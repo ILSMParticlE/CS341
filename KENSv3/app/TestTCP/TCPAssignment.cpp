@@ -291,45 +291,42 @@ void TCPAssignment::syscall_listen(UUID syscallUUID, int pid, int sockfd, int ba
 
 void TCPAssignment::syscall_accept(UUID syscallUUID, int pid,
 				int sockfd, struct sockaddr *addr, socklen_t *addrlen){
+	printf("\taccept\n");
 	if (!pcblist.count(pid) || !pcblist[pid]->fdlist.count(sockfd)){
 		this->returnSystemCall(syscallUUID, -1);
 		return;
 	}
+	printf("\tchekcpoint1\n");
 
 	Socket *sock = pcblist[pid]->fdlist[sockfd];
 	if (sock->state != S_LISTEN){
+		printf("state : %d\n", sock->state);
 		this->returnSystemCall(syscallUUID, -1);
 		return;
 	}
 
 	// block syscall if there is no waiting
 	if (sock->lq->pending.empty()){
+		printf("\tnope\n");
 		(*pcblist[pid]).block_syscall(ACCEPT, syscallUUID, sockfd, addr, 0, addrlen, 0);
 		return;
 	}
 
 	// duplicate socket
-	int fd = this->createFileDescriptor(pid);
-	Socket *sock_dup = new Socket;
-
-	in_port_t dest_port; in_addr_t dest_addr;
-	std::tie(dest_port, dest_addr) = sock->lq->pending.front();
+	printf("size before %d\n", sock->lq->pending.size());
+	Socket *sock_dup = sock->lq->pending.front();
 	sock->lq->pending.pop();
-	*sock_dup = *sock;
-	sock_dup->dest = set_addr_port(dest_addr, dest_port);
-	*addr = set_addr_port(htonl(dest_addr), htons(dest_port));
+	printf("size after %d\n", sock->lq->pending.size());
+
+	in_addr_t dest_addr = ((sockaddr_in *) &(sock_dup->dest))->sin_addr.s_addr;
+	in_port_t dest_port = ((sockaddr_in *) &(sock_dup->dest))->sin_port;
+	*addr = set_addr_port(htonl(dest_addr), htonl(dest_port));
 	*addrlen = sizeof(sock_dup->dest);
-	pcblist[pid]->fdlist[fd] = sock_dup;
 
-	// send packet and wait for ACK
-	Packet *packet = create_packet(sock_dup, SYN | ACK, nullptr, 0);
-	sock_dup->state = S_SYN_RCVD;
-	this->sendPacket("IPv4", packet);
-
-	(*pcblist[pid]).block_syscall(ACCEPT, syscallUUID, sockfd, addr, 0, addrlen, fd);
-
-	// increase current seq num
-	sock->seq_send ++;
+	int fd = sock->lq->pending_fd.front();
+	sock->lq->pending_fd.pop();
+	sock_dup->state = S_ESTAB;
+	this->returnSystemCall(syscallUUID, fd);
 }
 
 
@@ -348,22 +345,47 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 	int pid, sockfd;
 	Packet *myPacket;
 
-	//printf("%d %d\n", src_port, dest_port);;
+	//printf("%d %d\n", ntohs(src_port), ntohs(dest_port));;
 
 	if (get_pid_fd(src_addr, src_port, dest_addr, dest_port) == std::make_pair(-1, -1)){
 		// need to find listen state socket
 		if (get_listen_pid_fd(dest_addr, dest_port) != std::make_pair(-1, -1)){
 			std::tie(pid, sockfd) = get_listen_pid_fd(dest_addr,dest_port);
 			Socket *sock_listen = pcblist[pid]->fdlist[sockfd];
-			
-			// 200411 TODO : not blocked -> just add to queue
-			//					 blocked -> accept the packet's source
+		
 			assert(sock_listen->state == S_LISTEN);
 			if (!pcblist[pid]->block){
+				printf("size %d\n", sock_listen->lq->pending.size());
+				printf("%d %d\n", ntohs(src_port), ntohs(dest_port));
+				printf("sockfd %d\n", sockfd);
 				if (sock_listen->lq->pending.size() < sock_listen->lq->backlog){
-					sock_listen->lq->pending.push(std::make_pair(dest_port, dest_addr));
+					Socket *sock_dup = new Socket;
+					sock_dup->src = set_addr_port(ntohl(dest_addr), ntohs(dest_port));
+					sock_dup->dest = set_addr_port(ntohl(src_addr), ntohs(src_port));
+
+					uint32_t seq_sender;
+					packet->readData(34+4, &seq_sender, 4);
+					seq_sender = ntohl(seq_sender);
+					sock_dup->seq_recv = seq_sender + 1;
+
+					sock_listen->lq->pending.push(sock_dup);
+
+					int fd = this->createFileDescriptor(pid);
+					sock_listen->lq->pending_fd.push(fd);
+					pcblist[pid]->fdlist[fd] = sock_dup;
+
+					// send SYNACK
+					Packet *myPacket = create_packet(sock_dup, SYN | ACK, nullptr, 0);
+					sock_dup->state = S_SYN_RCVD;
+					this->sendPacket("IPv4", myPacket);
+
+					// increase seqnum
+					sock_dup->seq_send++;
 				}
 				else{
+					Socket *tmp = sock_listen->lq->pending.front();
+					printf("tmp %x\n", tmp);
+					printf("port : %d\n", ((sockaddr_in *) &tmp->dest)->sin_port);
 					printf("backlog is full... maybe should reset\n");
 				}
 			}
@@ -372,9 +394,9 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 				PCB::blockedInfo *b = pcblist[pid]->blocked_info;
 				assert(b->syscall == ACCEPT);
 
+				printf("sibaljohnna\n");
 				int fd = this->createFileDescriptor(pid);
 				Socket *sock_dup = new Socket;
-				*sock_dup = *sock_listen;
 				src_addr = ntohl(src_addr); src_port = ntohs(src_port);
 				sock_dup->dest = set_addr_port(src_addr, src_port);
 				dest_addr = ntohl(dest_addr); dest_port = ntohs(dest_port);
@@ -389,7 +411,6 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 				seq_sender = ntohl(seq_sender);
 				sock_dup->seq_recv = seq_sender + 1;
 	
-				printf("%d %d\n", dest_addr, dest_port);
 				*(b->addr) = set_addr_port(dest_addr, dest_port);
 				*(b->addr_len_ptr) = sizeof(sock_dup->dest);
 				pcblist[pid]->fdlist[fd] = sock_dup;
@@ -406,7 +427,6 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 		return;
 	}
 	
-
 	std::tie(pid, sockfd) = get_pid_fd(src_addr, src_port, dest_addr, dest_port);
 	PCB::blockedInfo *b = pcblist[pid]->blocked_info;
 	Socket *sock = pcblist[pid]->fdlist[sockfd];
@@ -445,21 +465,26 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 				// increase current seq num
 				sock->seq_send ++;
 			}
+			else if (flags & SYN){
+				
+				
+			}
 			break;
 		case S_SYN_RCVD:
 			if (flags & ACK){
-				assert(pcblist[pid]->block);
-				assert(b->syscall == ACCEPT);
-				this->returnSystemCall(b->syscallUUID, b->ret);
-				pcblist[pid]->unblock_syscall();
-				sock->state = S_ESTAB;
-				
+				if (pcblist[pid]->block && b->syscall == ACCEPT){
+					assert(pcblist[pid]->block);
+					assert(b->syscall == ACCEPT);
+					this->returnSystemCall(b->syscallUUID, b->ret);
+					pcblist[pid]->unblock_syscall();
+					sock->state = S_ESTAB;
+				}
 				// check ack from sender
 				uint32_t ack_sender;
 				packet->readData(34+8, &ack_sender, 4);
 				ack_sender = ntohl(ack_sender);
 				if (sock->seq_send != ack_sender) printf("fuck!!!\n");
-				
+			
 				// get seq num from sender;
 				uint32_t seq_sender;
 				packet->readData(34+4, &seq_sender, 4);
@@ -523,7 +548,6 @@ std::pair<int, int> TCPAssignment::get_pid_fd(in_addr_t src_addr, in_port_t src_
 			tmp_da = ((sockaddr_in *) &(sock->dest))->sin_addr.s_addr;
 			tmp_dp = ((sockaddr_in *) &(sock->dest))->sin_port;
 
-			//printf("%d %d %d %d\n", src_addr, src_port, dest_addr, dest_port);
 			if (src_addr == tmp_da && src_port == tmp_dp && dest_addr == tmp_sa && dest_port == tmp_sp)
 					return std::make_pair(pcb_it->first, fd_it->first);
 		}
@@ -537,7 +561,6 @@ std::pair<int, int> TCPAssignment::get_listen_pid_fd(in_addr_t dest_addr, in_por
 	Socket *sock;
 	
 	dest_addr = ntohl(dest_addr); dest_port = ntohs(dest_port);
-	//printf("getlisten : %d %d\n", dest_addr, dest_port);
 
 	for (pcb_it = pcblist.begin(); pcb_it != pcblist.end(); ++pcb_it){
 		//if (pcb_it->second->block) continue;
@@ -548,8 +571,6 @@ std::pair<int, int> TCPAssignment::get_listen_pid_fd(in_addr_t dest_addr, in_por
 			tmp_sa = ((sockaddr_in *) &(sock->src))->sin_addr.s_addr;
 			tmp_sp = ((sockaddr_in *) &(sock->src))->sin_port;
 
-			//printf("%d %d\n", tmp_sa, tmp_sp);
-			//printf("%d %d %d\n", sock->state, (tmp_sa == INADDR_ANY || tmp_sa == dest_addr), tmp_sp == dest_port);
 			if (sock->state == S_LISTEN && (tmp_sa == INADDR_ANY || tmp_sa == dest_addr) && tmp_sp == dest_port)
 					return std::make_pair(pcb_it->first, fd_it->first);
 		}

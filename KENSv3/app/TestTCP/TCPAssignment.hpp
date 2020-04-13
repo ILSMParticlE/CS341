@@ -42,10 +42,14 @@ private:
 	const int URG = 1 << 5;
 	/* packet header flags end */
 
+	class Socket;
 
 	class ListenQueue{
 	public:
-		std::queue<std::pair<in_port_t, in_addr_t>> pending;
+		//std::queue<std::pair<in_port_t, in_addr_t>> pending;
+		//std::queue<std::pair<in_port_t, in_addr_t>> srcinfo;
+		std::queue<Socket *> pending;
+		std::queue<int> pending_fd;
 		size_t backlog;
 
 		ListenQueue(size_t backlog);
