@@ -50,6 +50,8 @@ private:
 		//std::queue<std::pair<in_port_t, in_addr_t>> srcinfo;
 		std::queue<Socket *> pending;
 		std::queue<int> pending_fd;
+		
+		int cur_backlog;
 		size_t backlog;
 
 		ListenQueue(size_t backlog);

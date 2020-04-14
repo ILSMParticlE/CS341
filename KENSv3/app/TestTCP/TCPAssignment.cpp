@@ -358,7 +358,8 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 				printf("size %d\n", sock_listen->lq->pending.size());
 				printf("%d %d\n", ntohs(src_port), ntohs(dest_port));
 				printf("sockfd %d\n", sockfd);
-				if (sock_listen->lq->pending.size() < sock_listen->lq->backlog){
+				//if (sock_listen->lq->pending.size() < sock_listen->lq->backlog){
+				if (sock_listen->lq->cur_backlog < sock_listen->lq->backlog){
 					Socket *sock_dup = new Socket;
 					sock_dup->src = set_addr_port(ntohl(dest_addr), ntohs(dest_port));
 					sock_dup->dest = set_addr_port(ntohl(src_addr), ntohs(src_port));
@@ -373,6 +374,7 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 					int fd = this->createFileDescriptor(pid);
 					sock_listen->lq->pending_fd.push(fd);
 					pcblist[pid]->fdlist[fd] = sock_dup;
+					sock_listen->lq->cur_backlog++;
 
 					// send SYNACK
 					Packet *myPacket = create_packet(sock_dup, SYN | ACK, nullptr, 0);
@@ -477,8 +479,15 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 					assert(b->syscall == ACCEPT);
 					this->returnSystemCall(b->syscallUUID, b->ret);
 					pcblist[pid]->unblock_syscall();
-					sock->state = S_ESTAB;
 				}
+				sock->state = S_ESTAB;
+				
+				// rough code
+				int lpid, lfd;
+				std::tie(lpid, lfd) = get_listen_pid_fd(dest_addr, dest_port);
+				printf("sss %d\n", pcblist[lpid]->fdlist[lfd]->state);
+				pcblist[lpid]->fdlist[lfd]->lq->cur_backlog--;
+
 				// check ack from sender
 				uint32_t ack_sender;
 				packet->readData(34+8, &ack_sender, 4);
@@ -511,6 +520,7 @@ void TCPAssignment::timerCallback(void* payload)
 
 /* ListenQueue construct and detroyer */
 TCPAssignment::ListenQueue::ListenQueue(size_t size){
+	this->cur_backlog = 0;
 	this->backlog = size;
 }
 TCPAssignment::ListenQueue::~ListenQueue(){
