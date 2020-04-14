@@ -30,6 +30,7 @@ private:
 		S_LISTEN,
 		S_SYN_SENT,
 		S_SYN_RCVD,
+		S_SYN_SIMRCVD,
 		S_ESTAB
 	};
 
@@ -51,7 +52,7 @@ private:
 		std::queue<Socket *> pending;
 		std::queue<int> pending_fd;
 		
-		int cur_backlog;
+		size_t cur_backlog;
 		size_t backlog;
 
 		ListenQueue(size_t backlog);
