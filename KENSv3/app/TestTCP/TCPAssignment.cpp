@@ -117,8 +117,6 @@ void TCPAssignment::syscall_socket(UUID syscallUUID, int pid, int type, int prot
 void TCPAssignment::syscall_close(UUID syscallUUID, int pid, int sockfd){
 	Socket *sock = pcblist[pid]->fdlist[sockfd];
 	
-	//in_addr_t caddr = ntohl(((sockaddr_in *) &(sock->src))->sin_addr.s_addr);
-    //in_port_t cport = ntohs(((sockaddr_in *) &(sock->src))->sin_port);
 	in_addr_t caddr = ((sockaddr_in *) &(sock->src))->sin_addr.s_addr;
 	in_port_t cport = ((sockaddr_in *) &(sock->src))->sin_port;
 
