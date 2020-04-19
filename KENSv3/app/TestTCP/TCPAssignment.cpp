@@ -115,25 +115,61 @@ void TCPAssignment::syscall_socket(UUID syscallUUID, int pid, int type, int prot
 
 
 void TCPAssignment::syscall_close(UUID syscallUUID, int pid, int sockfd){
-	Socket *sock = pcblist[pid]->fdlist[sockfd];
-	
-	in_addr_t caddr = ((sockaddr_in *) &(sock->src))->sin_addr.s_addr;
-	in_port_t cport = ((sockaddr_in *) &(sock->src))->sin_port;
-
-	// remove data in bindlist
-	std::multimap<in_port_t, in_addr_t>::iterator it;
-	for (it = bindset.lower_bound(cport); it != bindset.upper_bound(cport); it++){
-		if (caddr == it->second){
-			bindset.erase(it);
-			break;
-		}
+	if (!pcblist.count(pid) || !pcblist[pid]->fdlist.count(sockfd)){
+		this->returnSystemCall(syscallUUID, -1);
+		return;
 	}
-	
-	
-	// remove data in fdlist
-	delete pcblist[pid]->fdlist[sockfd];
-	pcblist[pid]->fdlist.erase(sockfd);
 
+	Socket *sock = pcblist[pid]->fdlist[sockfd];
+
+	if (sock->state == S_ESTAB){
+		// active close in 4-handshaking
+		this->sendPacket("IPv4", create_packet(sock, FIN | ACK, nullptr, 0));
+		sock->state = S_FIN_WAIT_1;
+		sock->seq_send++;
+	}
+	else if (sock->state == S_CLOSE_WAIT){
+		// passive close in 4-handshaking
+		this->sendPacket("IPv4", create_packet(sock, FIN | ACK, nullptr, 0));
+		sock->state = S_LAST_ACK;
+		sock->seq_send++;
+	}
+	else{
+		// closing isolated or bound, listen socket
+		if (sock->bound){
+			if (sock->state == S_LISTEN){
+				// In my implementation, although I should send FINACK packet for established socket,
+				// it is impossible since I didn't put them in PCB. I cannot find the matched socket
+				// when packet is arrived to it...
+				// So I'm going to delete them all... assume that there is no such cases...
+
+				while (!sock->lq->pending.empty()){
+					Socket *tmp_sock = sock->lq->pending.front();
+					int tmp_fd = sock->lq->pending_fd.front();
+					sock->lq->pending.pop(); sock->lq->pending_fd.pop();
+
+					this->removeFileDescriptor(pid, tmp_fd);
+					delete tmp_sock;
+				}
+			}
+
+			// remove data in bindlist
+		 	in_addr_t caddr = ((sockaddr_in *) &(sock->src))->sin_addr.s_addr;
+			in_port_t cport = ((sockaddr_in *) &(sock->src))->sin_port;
+
+			std::multimap<in_port_t, in_addr_t>::iterator it;
+			for (it = bindset.lower_bound(cport); it != bindset.upper_bound(cport); it++){
+				if (caddr == it->second){
+					bindset.erase(it);
+					break;
+				}
+			}
+		}
+		pcblist[pid]->fdlist.erase(sockfd);
+		delete sock;
+	}
+
+	//pcblist[pid]->fdlist.erase(sockfd);
 	this->removeFileDescriptor(pid, sockfd);
 	this->returnSystemCall(syscallUUID, 0);
 }
@@ -158,7 +194,7 @@ void TCPAssignment::syscall_bind(UUID syscallUUID, int pid,
 	
 	// iterate bindlist to check whether overlapped addr exists
 	std::multimap<in_port_t, in_addr_t>::iterator it;
-	for (it = bindset.lower_bound(bind_port); it != bindset.upper_bound(bind_port); ++it){
+	for (it = bindset.lower_bound(bind_port); it != bindset.upper_bound(bind_port); it++){
 		if (bind_addr == INADDR_ANY || it->second == INADDR_ANY || bind_addr == it->second){
 			this->returnSystemCall(syscallUUID, -1);
 			return;
@@ -224,7 +260,7 @@ void TCPAssignment::syscall_connect(UUID syscallUUID, int pid, int sockfd,
 			local_port = rand() % 65536;
 			if (!bindset.count(local_port)) break;
 			std::multimap<in_port_t, in_addr_t>::iterator it;
-			for (it = bindset.lower_bound(local_port); it != bindset.upper_bound(local_port); ++it){
+			for (it = bindset.lower_bound(local_port); it != bindset.upper_bound(local_port); it++){
 				if (it->second == INADDR_ANY || it->second == local_addr || local_addr == INADDR_ANY) break;
 			}
 			if (it == bindset.end() || it->first != local_port) break;
@@ -448,7 +484,7 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 				this->sendPacket("IPv4", myPacket);
 
 				// increase current seq num
-				sock->seq_send ++;
+				//sock->seq_send ++;
 			}
 			else if (flags & SYN){
 				//simulatneous connect
@@ -504,7 +540,7 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 				uint32_t seq_sender;
 				packet->readData(34+4, &seq_sender, 4);
 				seq_sender = ntohl(seq_sender);
-				sock->seq_recv ++;
+				//sock->seq_recv ++;
 
 			}	
 			break;
@@ -528,6 +564,81 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 				// send packet
 				myPacket = create_packet(sock, ACK, nullptr, 0);
 				this->sendPacket("IPv4", myPacket);
+
+				sock->state = S_ESTAB;
+			}
+			break;
+		case S_ESTAB:
+			if ((flags & FIN) && (flags & ACK)){
+				// get seq num from sender
+				uint32_t seq_sender;
+				packet->readData(34+4, &seq_sender, 4);
+				seq_sender = ntohl(seq_sender);
+				sock->seq_recv = seq_sender + 1;
+
+				// send packet
+				myPacket = create_packet(sock, ACK, nullptr, 0);
+				this->sendPacket("IPv4", myPacket);
+
+				sock->state = S_CLOSE_WAIT;
+			}
+			break;
+		// active close
+		case S_FIN_WAIT_1:
+			if (flags & ACK){
+				if (flags & FIN){
+					// simultaneous close
+					uint32_t seq_sender;
+					packet->readData(34+4, &seq_sender, 4);
+					seq_sender = ntohl(seq_sender);
+					sock->seq_recv = seq_sender + 1;
+
+					myPacket = create_packet(sock, ACK, nullptr, 0);
+					this->sendPacket("IPv4", myPacket);
+
+					sock->state = S_CLOSING;
+				}
+				else{
+					// not simultaneous
+					sock->state = S_FIN_WAIT_2;
+				}
+			}
+			break;
+		case S_FIN_WAIT_2:
+			if ((flags & FIN) && (flags & ACK)){
+				// get seq num from sender
+				uint32_t seq_sender;
+				packet->readData(34+4, &seq_sender, 4);
+				seq_sender = ntohl(seq_sender);
+				sock->seq_recv = seq_sender + 1;
+
+				// send packet
+				myPacket = create_packet(sock, ACK, nullptr, 0);
+				this->sendPacket("IPv4", myPacket);
+
+				sock->state = S_TIMED_WAIT;
+
+				// TODO : timer check
+			}
+			break;
+		case S_CLOSING:
+			assert(flags & ACK);
+			sock->state = S_TIMED_WAIT;
+			// TODO: timer check
+			break;
+		case S_LAST_ACK:
+			if (flags & ACK){
+				pcblist[pid]->fdlist.erase(sockfd);
+				
+				std::multimap<in_port_t, in_addr_t>::iterator it;
+				for (it = bindset.lower_bound(dest_port); it != bindset.upper_bound(dest_port); ++it){
+					if (dest_addr == it->second){
+						bindset.erase(it);
+						break;
+					}
+				}
+				delete sock;
+
 			}
 		default:
 			break;
@@ -576,8 +687,8 @@ std::pair<int, int> TCPAssignment::get_pid_fd(in_addr_t src_addr, in_port_t src_
 	std::unordered_map<int, Socket *>::iterator fd_it;
 	Socket *sock;
 
-	for (pcb_it = pcblist.begin(); pcb_it != pcblist.end(); ++pcb_it){
-		for (fd_it = pcb_it->second->fdlist.begin(); fd_it != pcb_it->second->fdlist.end(); ++fd_it){
+	for (pcb_it = pcblist.begin(); pcb_it != pcblist.end(); pcb_it++){
+		for (fd_it = pcb_it->second->fdlist.begin(); fd_it != pcb_it->second->fdlist.end(); fd_it++){
 			sock = fd_it->second;
 			in_addr_t tmp_sa, tmp_da;
 			in_port_t tmp_sp, tmp_dp;
@@ -597,9 +708,9 @@ std::pair<int, int> TCPAssignment::get_listen_pid_fd(in_addr_t dest_addr, in_por
 	std::unordered_map<int, Socket *>::iterator fd_it;
 	Socket *sock;
 	
-	for (pcb_it = pcblist.begin(); pcb_it != pcblist.end(); ++pcb_it){
+	for (pcb_it = pcblist.begin(); pcb_it != pcblist.end(); pcb_it++){
 		//if (pcb_it-/second->block) continue;
-		for (fd_it = pcb_it->second->fdlist.begin(); fd_it != pcb_it->second->fdlist.end(); ++fd_it){
+		for (fd_it = pcb_it->second->fdlist.begin(); fd_it != pcb_it->second->fdlist.end(); fd_it++){
 			sock = fd_it->second;
 			in_addr_t tmp_sa;
 			in_port_t tmp_sp;

@@ -31,7 +31,15 @@ private:
 		S_SYN_SENT,
 		S_SYN_RCVD,
 		S_SYN_SIMRCVD,
-		S_ESTAB
+		S_ESTAB,
+
+		S_FIN_WAIT_1,
+		S_FIN_WAIT_2,
+		S_TIMED_WAIT,
+		S_CLOSE_WAIT,
+		S_CLOSING,		// simulaneous close
+
+		S_LAST_ACK
 	};
 
 	/* packet header flags */
