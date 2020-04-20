@@ -380,10 +380,11 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 
 	//printf("%d %d\n", ntohs(src_port), ntohs(dest_port));;
 
-	if (get_pid_fd(src_addr, src_port, dest_addr, dest_port) == std::make_pair(-1, -1)){
+	std::tie(pid, sockfd) = get_pid_fd(src_addr, src_port, dest_addr, dest_port);
+	if (pid == -1 && sockfd == -1){
 		// need to find listen state socket
-		if (get_listen_pid_fd(dest_addr, dest_port) != std::make_pair(-1, -1)){
-			std::tie(pid, sockfd) = get_listen_pid_fd(dest_addr,dest_port);
+		std::tie(pid, sockfd) = get_listen_pid_fd(dest_addr, dest_port);
+		if (pid != -1 && sockfd != -1){
 			Socket *sock_listen = pcblist[pid]->fdlist[sockfd];
 		
 			assert(sock_listen->state == S_LISTEN);
@@ -452,7 +453,6 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 		return;
 	}
 	
-	std::tie(pid, sockfd) = get_pid_fd(src_addr, src_port, dest_addr, dest_port);
 	PCB::blockedInfo *b = pcblist[pid]->blocked_info;
 	Socket *sock = pcblist[pid]->fdlist[sockfd];
 
@@ -618,13 +618,16 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 
 				sock->state = S_TIMED_WAIT;
 
-				// TODO : timer check
+				// timer check
+				this->addTimer(sock, TimeUtil::makeTime(2, TimeUtil::MINUTE));
 			}
 			break;
 		case S_CLOSING:
 			assert(flags & ACK);
 			sock->state = S_TIMED_WAIT;
-			// TODO: timer check
+
+			// timer check
+			this->addTimer(sock, TimeUtil::makeTime(2, TimeUtil::MINUTE));
 			break;
 		case S_LAST_ACK:
 			if (flags & ACK){
@@ -650,7 +653,13 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 
 void TCPAssignment::timerCallback(void* payload)
 {
-
+	Socket *sock = (Socket *) payload;
+	int pid, fd;
+	std::tie(pid, fd) = get_pid_fd_sock(sock);
+	if (pid == -1 && fd == -1) printf("shit\n");
+	else{
+		pcblist[pid]->fdlist.erase(fd);
+	}
 }
 
 
@@ -701,6 +710,16 @@ std::pair<int, int> TCPAssignment::get_pid_fd(in_addr_t src_addr, in_port_t src_
 		}
 	}
 	return std::make_pair(-1, -1);
+}
+
+std::pair<int, int> TCPAssignment::get_pid_fd_sock(Socket *sock){
+	in_addr_t saddr, daddr; in_port_t sport, dport;
+	sockaddr_in *sinfo = (sockaddr_in *) &sock->src;
+	sockaddr_in *dinfo = (sockaddr_in *) &sock->dest;
+	saddr = sinfo->sin_addr.s_addr; sport = sinfo->sin_port;
+	daddr = dinfo->sin_addr.s_addr; dport = dinfo->sin_port;
+
+	return get_pid_fd(daddr, dport, saddr, sport);
 }
 
 std::pair<int, int> TCPAssignment::get_listen_pid_fd(in_addr_t dest_addr, in_port_t dest_port){

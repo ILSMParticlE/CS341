@@ -19,6 +19,8 @@
 
 #include <E/E_TimerModule.hpp>
 
+#include <E/E_TimeUtil.hpp>
+
 namespace E
 {
 
@@ -131,6 +133,7 @@ public:
 	void syscall_accept(UUID syscallUUID, int pid, int sockfd, struct sockaddr *addr, socklen_t *addrlen);
 
 	std::pair<int, int> get_pid_fd(in_addr_t src_addr, in_port_t src_port, in_addr_t dest_addr, in_port_t dest_port);
+	std::pair<int, int> get_pid_fd_sock(Socket *sock);
 	std::pair<int, int> get_listen_pid_fd(in_addr_t dest_addr, in_port_t dest_port);
 
 	std::pair<in_addr_t, in_port_t> get_addr_port(struct sockaddr_in *info);
