@@ -75,15 +75,26 @@ private:
 		bool bound;
 
 		SocketState state;
-		uint32_t seq_send;
-		uint32_t seq_recv;
+		uint32_t seq_send;		// seq num
+		uint32_t seq_recv;		// ack num
 
-		uint16_t wnd_size;
+		// window related members
+		uint16_t max_wnd = 51200;
+		uint16_t rwnd;		// my window size
+		uint16_t swnd;			// window size of other side
+
+		// buffer related members
+		void *rbuf;
+		size_t buf_size;
+		size_t in_flight;
+		std::unordered_map<uint16_t, size_t> seqn_to_len;		// temporary member in 3-1
+		std::unordered_map<uint16_t, Packet *> unacked;
 
 		ListenQueue *lq;
 
 		Socket();
 		~Socket();
+		size_t readBuf(const void *buf, size_t count);
 
 	};
 	class PCB{
@@ -100,12 +111,17 @@ private:
 			socklen_t addr_len;
 			socklen_t *addr_len_ptr;
 
+			const void *buf;
+			size_t count;
+
 			int ret;
 		};
 		struct blockedInfo *blocked_info = nullptr;
 
 		void block_syscall(SystemCall syscall, UUID syscallUUID, int sockfd,
-						struct sockaddr *addr, socklen_t addrlen, socklen_t *addr_len_ptr, int ret);
+						struct sockaddr *addr, socklen_t addrlen, socklen_t *addr_len_ptr,
+						const void *buf, size_t count,
+						int ret);
 		void unblock_syscall();
 	};
 	std::unordered_map<int, PCB *> pcblist;
@@ -131,6 +147,9 @@ public:
 	void syscall_getpeername(UUID syscallUUID, int pid, int sockfd, struct sockaddr *addr, socklen_t *addrlen);
 	void syscall_listen(UUID syscallUUID, int pid, int sockfd, int backlog);
 	void syscall_accept(UUID syscallUUID, int pid, int sockfd, struct sockaddr *addr, socklen_t *addrlen);
+	void syscall_write(UUID syscallUUID, int pid, int sockfd, const void *buf, size_t count);
+	void syscall_read(UUID syscallUUID,  int pid, int sockfd, const void *buf, size_t count);
+
 
 	std::pair<int, int> get_pid_fd(in_addr_t src_addr, in_port_t src_port, in_addr_t dest_addr, in_port_t dest_port);
 	std::pair<int, int> get_pid_fd_sock(Socket *sock);
@@ -141,6 +160,8 @@ public:
 
 	void write_header(Packet *packet, Socket *sock, uint16_t flags);
 	Packet *create_packet(Socket *sock, uint16_t flags, void *data, size_t data_len);
+
+	size_t writeBuf(Socket *cok, const void *buf, size_t count);
 
 protected:
 	virtual void systemCallback(UUID syscallUUID, int pid, const SystemCallParameter& param) final;

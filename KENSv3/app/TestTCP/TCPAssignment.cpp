@@ -52,10 +52,10 @@ void TCPAssignment::systemCallback(UUID syscallUUID, int pid, const SystemCallPa
 		this->syscall_close(syscallUUID, pid, param.param1_int);
 		break;
 	case READ:
-		//this->syscall_read(syscallUUID, pid, param.param1_int, param.param2_ptr, param.param3_int);
+		this->syscall_read(syscallUUID, pid, param.param1_int, param.param2_ptr, param.param3_int);
 		break;
 	case WRITE:
-		//this->syscall_write(syscallUUID, pid, param.param1_int, param.param2_ptr, param.param3_int);
+		this->syscall_write(syscallUUID, pid, param.param1_int, param.param2_ptr, param.param3_int);
 		break;
 	case CONNECT:
 		this->syscall_connect(syscallUUID, pid, param.param1_int,
@@ -121,7 +121,7 @@ void TCPAssignment::syscall_close(UUID syscallUUID, int pid, int sockfd){
 	}
 
 	Socket *sock = pcblist[pid]->fdlist[sockfd];
-
+	
 	if (sock->state == S_ESTAB){
 		// active close in 4-handshaking
 		this->sendPacket("IPv4", create_packet(sock, FIN | ACK, nullptr, 0));
@@ -279,7 +279,7 @@ void TCPAssignment::syscall_connect(UUID syscallUUID, int pid, int sockfd,
 	sock->seq_send ++;
 
 	// block system call
-	(*pcblist[pid]).block_syscall(CONNECT, syscallUUID, sockfd, addr, addrlen, nullptr, 0);
+	(*pcblist[pid]).block_syscall(CONNECT, syscallUUID, sockfd, addr, addrlen, nullptr, nullptr, 0, 0);
 }
 
 void TCPAssignment::syscall_getpeername(UUID syscallUUID, int pid, int sockfd,
@@ -336,7 +336,7 @@ void TCPAssignment::syscall_accept(UUID syscallUUID, int pid,
 
 	// block syscall if there is no waiting
 	if (sock->lq->pending.empty()){
-		(*pcblist[pid]).block_syscall(ACCEPT, syscallUUID, sockfd, addr, 0, addrlen, 0);
+		(*pcblist[pid]).block_syscall(ACCEPT, syscallUUID, sockfd, addr, 0, addrlen, nullptr, 0, 0);
 		return;
 	}
 
@@ -354,6 +354,63 @@ void TCPAssignment::syscall_accept(UUID syscallUUID, int pid,
 	sock_dup->state = S_ESTAB;
 	this->returnSystemCall(syscallUUID, fd);
 }
+
+void TCPAssignment::syscall_write(UUID syscallUUID,  int pid, int sockfd, const void *buf, size_t count){
+	if (!pcblist.count(pid) || !pcblist[pid]->fdlist.count(sockfd)){
+		this->returnSystemCall(syscallUUID, -1);
+		return;
+	}
+
+
+	Socket *sock = pcblist[pid]->fdlist[sockfd];
+	//if (sock->state != S_ESTAB){
+	//	this->returnSystemCall(syscallUUID, -1);
+	//	return;
+	//}
+
+
+	if (count == 0){
+		this->returnSystemCall(syscallUUID, 0);
+		return;
+	}
+
+	int ret = (int) writeBuf(sock, buf, count);
+	if (ret == 0){
+		// cannot write, buffer is full!
+		(*pcblist[pid]).block_syscall(WRITE, syscallUUID, sockfd, nullptr, 0, nullptr, buf, count, 0);
+		return;
+	}
+
+	this->returnSystemCall(syscallUUID, ret);
+}
+
+void TCPAssignment::syscall_read(UUID syscallUUID,  int pid, int sockfd, const void *buf, size_t count){
+	if (!pcblist.count(pid) || !pcblist[pid]->fdlist.count(sockfd)){
+		this->returnSystemCall(syscallUUID, -1);
+		return;
+	}
+
+	Socket *sock = pcblist[pid]->fdlist[sockfd];
+	//if (sock->state != S_ESTAB){
+	//	this->returnSystemCall(syscallUUID, -1);
+	//	return;
+	//}
+
+	if (count == 0){
+		this->returnSystemCall(syscallUUID, 0);
+		return;
+	}
+
+	int ret = (int) sock->readBuf(buf, count);
+	if (ret == 0){
+		// block system call
+		(*pcblist[pid]).block_syscall(READ, syscallUUID, sockfd, nullptr, 0, nullptr, buf, count, 0);
+		return;
+	}
+
+	this->returnSystemCall(syscallUUID, ret);
+}
+
 
 
 
@@ -446,7 +503,7 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 				this->sendPacket("IPv4", myPacket);
 				sock_dup->seq_send ++;
 
-				(*pcblist[pid]).block_syscall(ACCEPT, b->syscallUUID, b->sockfd, b->addr, 0, b->addr_len_ptr, fd);
+				(*pcblist[pid]).block_syscall(ACCEPT, b->syscallUUID, b->sockfd, b->addr, 0, b->addr_len_ptr, nullptr, 0, fd);
 			}
 		}	
 		this->freePacket(packet);
@@ -455,6 +512,11 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 	
 	PCB::blockedInfo *b = pcblist[pid]->blocked_info;
 	Socket *sock = pcblist[pid]->fdlist[sockfd];
+
+	// read opponent's window size
+	uint16_t swnd;
+	packet->readData(34+14, &swnd, 2);
+	sock->swnd = htons(swnd);
 
 	switch (sock->state){
 		case S_SYN_SENT:
@@ -582,6 +644,63 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 
 				sock->state = S_CLOSE_WAIT;
 			}
+
+			// read and write
+			else if (flags & ACK){
+				// get data length
+				uint16_t data_len;
+				packet->readData(14+2, &data_len, 2);
+				data_len = ntohs(data_len) - 40;
+			
+				if (data_len == 0){	
+					// 3-2 TODO : check inflight algorithm
+					uint32_t ack_sender;
+					packet->readData(34+8, &ack_sender, 4);
+					ack_sender = ntohl(ack_sender);
+					if (sock->seqn_to_len.count(ack_sender)){
+						sock->in_flight -= sock->seqn_to_len[ack_sender];
+						assert(sock->in_flight >= 0);
+					}
+				}
+				
+				if (data_len > 0){
+					packet->readData(54, sock->rbuf + sock->buf_size, data_len);
+					sock->buf_size += data_len;
+					sock->rwnd -= data_len;
+					assert(sock->rwnd >= 0 && sock->rwnd <= 51200);
+
+				}
+
+
+				// unblock syscall
+				if (pcblist[pid]->block){
+					PCB::blockedInfo *b = pcblist[pid]->blocked_info;
+					if (b->syscall == WRITE){
+						if (sock->swnd - sock->in_flight > 0){		// 3-2 TODO :in flight, not received ACK...
+							int ret = (int) writeBuf(sock, b->buf, b->count);
+							assert(ret > 0);
+							this->returnSystemCall(b->syscallUUID, ret);
+							pcblist[pid]->unblock_syscall();
+						}
+					}
+					else if (b->syscall == READ){
+						if (sock->buf_size > 0){
+							int ret = (int) sock->readBuf(b->buf, b->count);
+							assert(ret > 0);
+							this->returnSystemCall(b->syscallUUID, ret);
+							pcblist[pid]->unblock_syscall();
+						}
+					}
+				}
+
+				// applying change in window, and send ACK
+				if (data_len > 0){
+					sock->seq_recv += data_len;
+					myPacket = create_packet(sock, ACK, nullptr, 0);
+					this->sendPacket("IPv4", myPacket);
+				}
+			}
+
 			break;
 		// active close
 		case S_FIN_WAIT_1:
@@ -663,6 +782,9 @@ void TCPAssignment::timerCallback(void* payload)
 }
 
 
+/*****************************************************************/
+/*				Constructor and Destoyer of classes 			 */
+/*****************************************************************/
 
 /* ListenQueue construct and detroyer */
 TCPAssignment::ListenQueue::ListenQueue(size_t size){
@@ -681,7 +803,10 @@ TCPAssignment::Socket::Socket(){
 	state = S_CLOSED;
 	seq_send = rand();
 
-	wnd_size = 51200;
+	rwnd = 51200;
+	buf_size = 0;
+	rbuf = malloc(max_wnd);
+	in_flight = 0;
 
 	lq = nullptr;
 }
@@ -794,10 +919,10 @@ void TCPAssignment::write_header(Packet *packet, Socket *sock, uint16_t flags){
 	f = htons(f);
 	packet->writeData(34+12, &f, 2);
 
-	// TODO : write receive window
-	uint16_t wnd_size = sock->wnd_size;
-	wnd_size = htons(wnd_size);
-	packet->writeData(34+14, &wnd_size, 2);
+	// write rwnd
+	uint16_t rwnd = sock->rwnd;
+	rwnd = htons(rwnd);
+	packet->writeData(34+14, &rwnd, 2);
 }
 
 Packet *TCPAssignment::create_packet(Socket *sock, uint16_t flags, void *data, size_t data_len){
@@ -805,7 +930,7 @@ Packet *TCPAssignment::create_packet(Socket *sock, uint16_t flags, void *data, s
 	write_header(new_packet, sock, flags);
 
 	// TODO : write data
-	// will do at Lab3
+	new_packet->writeData(54, data, data_len);
 
 	// write checksum
 	uint32_t src_addr, dest_addr;
@@ -823,13 +948,64 @@ Packet *TCPAssignment::create_packet(Socket *sock, uint16_t flags, void *data, s
 }
 
 
+/*****************************************************************/
+/*					 Functions handle buffers					 */
+/*****************************************************************/
+
+size_t TCPAssignment::writeBuf(Socket *sock, const void *buf, size_t count){
+	size_t ret = 0;
+	uint8_t *data = (uint8_t *) buf;
+
+	// 3-2 TODO : check cnt
+
+	//assert(sock->swnd > 0);
+	size_t cnt = count >= sock->swnd - sock->in_flight? sock->swnd - sock->in_flight : count;
+	while (cnt > 0){
+		size_t data_len = cnt > 512? 512 : cnt;
+
+		Packet *p = create_packet(sock, ACK, data, data_len);
+		this->sendPacket("IPv4", p);
+
+		// 3-2 TODO: keep the packet(duplicated) and send it again when it is lost
+		sock->seqn_to_len[sock->seq_send + data_len] = data_len;
+		sock->in_flight += data_len;
+
+		sock->seq_send += data_len;
+		data += data_len;
+		ret += data_len;
+		cnt -= data_len;
+	}
+	return ret;
+}
+
+size_t TCPAssignment::Socket::readBuf(const void *buf, size_t count){
+	void *new_rbuf = malloc(max_wnd);
+	memset(new_rbuf, 0, max_wnd);
+
+	size_t rdata_len = count >= buf_size? buf_size: count;
+	memcpy((void *)buf, rbuf, rdata_len);
+	buf_size -= rdata_len;
+	rwnd += rdata_len;
+
+	memcpy(new_rbuf, (uint8_t *)rbuf + rdata_len, buf_size);
+
+	void *dbuf = rbuf;
+	rbuf = new_rbuf;
+	free(dbuf);
+
+	return rdata_len;
+}
+
+
 
 /*****************************************************************/
 /*					 Block and unblock syscall					 */
 /*****************************************************************/
 
 void TCPAssignment::PCB::block_syscall(SystemCall syscall, UUID syscallUUID, int sockfd,
-				struct sockaddr *addr, socklen_t addr_len, socklen_t *addr_len_ptr, int ret){
+				struct sockaddr *addr, socklen_t addr_len, socklen_t *addr_len_ptr,
+				const void *buf, size_t count,
+				int ret){
 	this->block = true;
 	this->blocked_info = new blockedInfo;
 	
@@ -840,6 +1016,10 @@ void TCPAssignment::PCB::block_syscall(SystemCall syscall, UUID syscallUUID, int
 	this->blocked_info->addr = addr;
 	this->blocked_info->addr_len = addr_len;
 	this->blocked_info->addr_len_ptr = addr_len_ptr;
+
+	this->blocked_info->buf = buf;
+	this->blocked_info->count = count;
+
 	this->blocked_info->ret = ret;
 
 
