@@ -643,6 +643,12 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 				this->sendPacket("IPv4", myPacket);
 
 				sock->state = S_CLOSE_WAIT;
+
+				// if there is remaining blocked systemcall, break it
+				if (pcblist[pid]->block){
+					this->returnSystemCall(pcblist[pid]->blocked_info->syscallUUID, -1);
+				}
+
 			}
 
 			// read and write
