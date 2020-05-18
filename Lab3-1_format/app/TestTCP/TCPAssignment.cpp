@@ -423,14 +423,21 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 	packet->readData(14+12, &src_addr, 4);
 	packet->readData(14+16, &dest_addr, 4);
 	packet->readData(34, &src_port, 2);
-	packet->readData(36, &dest_port, 2);	// addr and port of "sender", not receiver
+	packet->readData(34+2, &dest_port, 2);	// addr and port of "sender", not receiver
 	src_addr = ntohl(src_addr); src_port = ntohs(src_port);
 	dest_addr = ntohl(dest_addr); dest_port = ntohs(dest_port);
 
+	uint32_t seq_sender, ack_sender;
+	packet->readData(34+4, &seq_sender, 4);
+	packet->readData(34+8, &ack_sender, 4);
+	seq_sender = ntohl(seq_sender);
+	ack_sender = ntohl(ack_sender);
 
 	uint16_t flags;
 	packet->readData(34+12, &flags, 2);
 	flags = htons(flags);
+
+
 
 	int pid, sockfd;
 	Packet *myPacket;
@@ -451,9 +458,6 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 					sock_dup->src = set_addr_port(dest_addr, dest_port);
 					sock_dup->dest = set_addr_port(src_addr, src_port);
 
-					uint32_t seq_sender;
-					packet->readData(34+4, &seq_sender, 4);
-					seq_sender = ntohl(seq_sender);
 					sock_dup->seq_recv = seq_sender + 1;
 
 					sock_listen->lq->pending.push(sock_dup);
@@ -485,13 +489,6 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 				sock_dup->dest = set_addr_port(src_addr, src_port);
 				sock_dup->src = set_addr_port(dest_addr, dest_port);
 
-				uint32_t ack_sender;
-				packet->readData(34+8, &ack_sender, 4);
-				ack_sender = ntohl(ack_sender);
-				
-				uint32_t seq_sender;
-				packet->readData(34+4, &seq_sender, 4);
-				seq_sender = ntohl(seq_sender);
 				sock_dup->seq_recv = seq_sender + 1;
 	
 				*(b->addr) = set_addr_port(dest_addr, dest_port);
@@ -529,16 +526,8 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 				pcblist[pid]->unblock_syscall();
 				sock->state = S_ESTAB;
 				
-				// check ack from sender
-				uint32_t ack_sender;
-				packet->readData(34+8, &ack_sender, 4);
-				ack_sender = ntohl(ack_sender);
 				if (sock->seq_send != ack_sender) printf("fuck!\n");
 
-				// get seq num from sender
-				uint32_t seq_sender;
-				packet->readData(34+4, &seq_sender, 4);
-				seq_sender = ntohl(seq_sender);
 				sock->seq_recv = seq_sender + 1;
 
 				// send packet
@@ -554,18 +543,9 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 					
 				assert(pcblist[pid]->block);
 				assert(b->syscall == CONNECT);
-
 				
-				// check ack from sender
-				uint32_t ack_sender;
-				packet->readData(34+8, &ack_sender, 4);
-				ack_sender = ntohl(ack_sender);
 				//if (sock->seq_send != ack_sender) printf("fuck!123\n");
 
-				// get seq num from sender
-				uint32_t seq_sender;
-				packet->readData(34+4, &seq_sender, 4);
-				seq_sender = ntohl(seq_sender);
 				sock->seq_recv = seq_sender + 1;
 
 				// send packet
@@ -592,17 +572,9 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 				std::tie(lpid, lfd) = get_listen_pid_fd(dest_addr, dest_port);
 				pcblist[lpid]->fdlist[lfd]->lq->cur_backlog--;
 
-				// check ack from sender
-				uint32_t ack_sender;
-				packet->readData(34+8, &ack_sender, 4);
-				ack_sender = ntohl(ack_sender);
 				if (sock->seq_send != ack_sender) printf("fuck!!!\n");
 			
-				// get seq num from sender;
-				uint32_t seq_sender;
-				packet->readData(34+4, &seq_sender, 4);
 				seq_sender = ntohl(seq_sender);
-				//sock->seq_recv ++;
 
 			}	
 			break;
@@ -611,16 +583,8 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 				this->returnSystemCall(b->syscallUUID, 0);
 				pcblist[pid]->unblock_syscall();
 
-				// check ack from sender
-				uint32_t ack_sender;
-				packet->readData(34+8, &ack_sender, 4);
-				ack_sender = ntohl(ack_sender);
 				if (sock->seq_send != ack_sender) printf("fuck!!!!!!\n");
 
-				// get seq num from sender
-				uint32_t seq_sender;
-				packet->readData(34+4, &seq_sender, 4);
-				seq_sender = ntohl(seq_sender);
 				sock->seq_recv = seq_sender + 1;
 
 				// send packet
@@ -632,10 +596,6 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 			break;
 		case S_ESTAB:
 			if ((flags & FIN) && (flags & ACK)){
-				// get seq num from sender
-				uint32_t seq_sender;
-				packet->readData(34+4, &seq_sender, 4);
-				seq_sender = ntohl(seq_sender);
 				sock->seq_recv = seq_sender + 1;
 
 				// send packet
@@ -713,9 +673,6 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 			if (flags & ACK){
 				if (flags & FIN){
 					// simultaneous close
-					uint32_t seq_sender;
-					packet->readData(34+4, &seq_sender, 4);
-					seq_sender = ntohl(seq_sender);
 					sock->seq_recv = seq_sender + 1;
 
 					myPacket = create_packet(sock, ACK, nullptr, 0);
@@ -731,10 +688,6 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 			break;
 		case S_FIN_WAIT_2:
 			if ((flags & FIN) && (flags & ACK)){
-				// get seq num from sender
-				uint32_t seq_sender;
-				packet->readData(34+4, &seq_sender, 4);
-				seq_sender = ntohl(seq_sender);
 				sock->seq_recv = seq_sender + 1;
 
 				// send packet
@@ -953,6 +906,9 @@ Packet *TCPAssignment::create_packet(Socket *sock, uint16_t flags, void *data, s
 	return new_packet;
 }
 
+void TCPAssignment::transmit_packet(Socket *sock, Packet *p, size_t count){
+	
+}
 
 /*****************************************************************/
 /*					 Functions handle buffers					 */
