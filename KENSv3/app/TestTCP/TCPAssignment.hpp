@@ -160,8 +160,9 @@ public:
 
 	void write_header(Packet *packet, Socket *sock, uint16_t flags);
 	Packet *create_packet(Socket *sock, uint16_t flags, void *data, size_t data_len);
+	void transmit_packet(Socket *sock, Packet *p, size_t count);
 
-	size_t writeBuf(Socket *cok, const void *buf, size_t count);
+	size_t writeBuf(Socket *sock, const void *buf, size_t count);
 
 protected:
 	virtual void systemCallback(UUID syscallUUID, int pid, const SystemCallParameter& param) final;
