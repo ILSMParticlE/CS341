@@ -91,6 +91,7 @@ private:
 
 		std::list<uint32_t> unacked;
 		std::unordered_map<uint32_t, Packet *> acktop;
+		int dup_ack;
 
 		ListenQueue *lq;
 

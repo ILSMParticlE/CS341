@@ -87,8 +87,11 @@ private:
 		void *rbuf;
 		size_t buf_size;
 		size_t in_flight;
-		std::unordered_map<uint16_t, size_t> seqn_to_len;		// temporary member in 3-1
-		std::unordered_map<uint16_t, Packet *> unacked;
+		std::unordered_map<uint32_t, size_t> seqn_to_len;		// temporary member in 3-1
+
+		std::list<uint32_t> unacked;
+		std::unordered_map<uint32_t, Packet *> acktop;
+		int dup_ack;
 
 		ListenQueue *lq;
 
@@ -160,7 +163,7 @@ public:
 
 	void write_header(Packet *packet, Socket *sock, uint16_t flags);
 	Packet *create_packet(Socket *sock, uint16_t flags, void *data, size_t data_len);
-	void transmit_packet(Socket *sock, Packet *p, size_t count);
+	void transmit_packet(Socket *sock, Packet *p, bool isACK, size_t count);
 
 	size_t writeBuf(Socket *sock, const void *buf, size_t count);
 

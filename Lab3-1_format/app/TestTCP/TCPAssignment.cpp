@@ -121,18 +121,18 @@ void TCPAssignment::syscall_close(UUID syscallUUID, int pid, int sockfd){
 	}
 
 	Socket *sock = pcblist[pid]->fdlist[sockfd];
-	
+
 	if (sock->state == S_ESTAB){
 		// active close in 4-handshaking
-		this->sendPacket("IPv4", create_packet(sock, FIN | ACK, nullptr, 0));
+		Packet *myPacket = create_packet(sock, FIN | ACK, nullptr, 0);
+		transmit_packet(sock, myPacket, false, 0);
 		sock->state = S_FIN_WAIT_1;
-		sock->seq_send++;
 	}
 	else if (sock->state == S_CLOSE_WAIT){
 		// passive close in 4-handshaking
-		this->sendPacket("IPv4", create_packet(sock, FIN | ACK, nullptr, 0));
+		Packet *myPacket = create_packet(sock, FIN | ACK, nullptr, 0);
+		transmit_packet(sock, myPacket, false, 0);
 		sock->state = S_LAST_ACK;
-		sock->seq_send++;
 	}
 	else{
 		// closing isolated or bound, listen socket
@@ -141,7 +141,7 @@ void TCPAssignment::syscall_close(UUID syscallUUID, int pid, int sockfd){
 				// In my implementation, although I should send FINACK packet for established socket,
 				// it is impossible since I didn't put them in PCB. I cannot find the matched socket
 				// when packet is arrived to it...
-				// So I'm going to delete them all... assume that there is no such cases...
+				// So I'm going to delete them all... assume that there are no such cases...
 
 				while (!sock->lq->pending.empty()){
 					Socket *tmp_sock = sock->lq->pending.front();
@@ -272,11 +272,7 @@ void TCPAssignment::syscall_connect(UUID syscallUUID, int pid, int sockfd,
 	// send packet
 	Packet *packet = create_packet(sock, SYN, nullptr, 0);
 	sock->state = S_SYN_SENT;
-	this->sendPacket("IPv4", packet);
-
-
-	// increase current seq num
-	sock->seq_send ++;
+	transmit_packet(sock, packet, false, 0);
 
 	// block system call
 	(*pcblist[pid]).block_syscall(CONNECT, syscallUUID, sockfd, addr, addrlen, nullptr, nullptr, 0, 0);
@@ -407,7 +403,6 @@ void TCPAssignment::syscall_read(UUID syscallUUID,  int pid, int sockfd, const v
 		(*pcblist[pid]).block_syscall(READ, syscallUUID, sockfd, nullptr, 0, nullptr, buf, count, 0);
 		return;
 	}
-
 	this->returnSystemCall(syscallUUID, ret);
 }
 
@@ -436,8 +431,6 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 	uint16_t flags;
 	packet->readData(34+12, &flags, 2);
 	flags = htons(flags);
-
-
 
 	int pid, sockfd;
 	Packet *myPacket;
@@ -470,10 +463,8 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 					// send SYNACK
 					Packet *myPacket = create_packet(sock_dup, SYN | ACK, nullptr, 0);
 					sock_dup->state = S_SYN_RCVD;
-					this->sendPacket("IPv4", myPacket);
-
-					// increase seqnum
-					sock_dup->seq_send++;
+					transmit_packet(sock_dup, myPacket, false, 0);
+					
 				}
 				else{
 					printf("backlog is full... maybe should reset\n");
@@ -497,8 +488,7 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 
 				myPacket = create_packet(sock_dup, SYN | ACK, nullptr, 0);
 				sock_dup->state = S_SYN_RCVD;
-				this->sendPacket("IPv4", myPacket);
-				sock_dup->seq_send ++;
+				transmit_packet(sock_dup, myPacket, false, 0);
 
 				(*pcblist[pid]).block_syscall(ACCEPT, b->syscallUUID, b->sockfd, b->addr, 0, b->addr_len_ptr, nullptr, 0, fd);
 			}
@@ -532,10 +522,7 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 
 				// send packet
 				myPacket = create_packet(sock, ACK, nullptr, 0);
-				this->sendPacket("IPv4", myPacket);
-
-				// increase current seq num
-				//sock->seq_send ++;
+				transmit_packet(sock, myPacket, true, 0);
 			}
 			else if (flags & SYN){
 				//simulatneous connect
@@ -551,14 +538,15 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 				// send packet
 				sock->seq_send--;
 				myPacket = create_packet(sock, SYN | ACK, nullptr, 0);
-				this->sendPacket("IPv4", myPacket);
-
-				// increase current seq num
-				sock->seq_send ++;
+				transmit_packet(sock, myPacket, false, 0);
 			}
 			break;
 		case S_SYN_RCVD:
-			if (flags & ACK){
+			if ((flags & FIN) && (flags & ACK)){
+				printf("sibal\n");
+				sock->state = S_CLOSE_WAIT;
+			}
+			else if (flags & ACK){
 				if (pcblist[pid]->block && b->syscall == ACCEPT){
 					assert(pcblist[pid]->block);
 					assert(b->syscall == ACCEPT);
@@ -589,7 +577,7 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 
 				// send packet
 				myPacket = create_packet(sock, ACK, nullptr, 0);
-				this->sendPacket("IPv4", myPacket);
+				transmit_packet(sock, myPacket, true, 0);
 
 				sock->state = S_ESTAB;
 			}
@@ -600,7 +588,7 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 
 				// send packet
 				myPacket = create_packet(sock, ACK, nullptr, 0);
-				this->sendPacket("IPv4", myPacket);
+				transmit_packet(sock, myPacket, true, 0);
 
 				sock->state = S_CLOSE_WAIT;
 
@@ -663,7 +651,7 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 				if (data_len > 0){
 					sock->seq_recv += data_len;
 					myPacket = create_packet(sock, ACK, nullptr, 0);
-					this->sendPacket("IPv4", myPacket);
+					transmit_packet(sock, myPacket, true, 0);
 				}
 			}
 
@@ -676,7 +664,7 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 					sock->seq_recv = seq_sender + 1;
 
 					myPacket = create_packet(sock, ACK, nullptr, 0);
-					this->sendPacket("IPv4", myPacket);
+					transmit_packet(sock, myPacket, true, 0);
 
 					sock->state = S_CLOSING;
 				}
@@ -692,7 +680,7 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 
 				// send packet
 				myPacket = create_packet(sock, ACK, nullptr, 0);
-				this->sendPacket("IPv4", myPacket);
+				transmit_packet(sock, myPacket, true, 0);
 
 				sock->state = S_TIMED_WAIT;
 
@@ -766,6 +754,7 @@ TCPAssignment::Socket::Socket(){
 	buf_size = 0;
 	rbuf = malloc(max_wnd);
 	in_flight = 0;
+	dup_ack = 0;
 
 	lq = nullptr;
 }
@@ -906,8 +895,31 @@ Packet *TCPAssignment::create_packet(Socket *sock, uint16_t flags, void *data, s
 	return new_packet;
 }
 
-void TCPAssignment::transmit_packet(Socket *sock, Packet *p, size_t count){
+void TCPAssignment::transmit_packet(Socket *sock, Packet *p, bool isACK, size_t count){
+	// when data length is zero
+	if (isACK){
+		this->sendPacket("IPv4", p);
+		return;
+	}
+
+	size_t seq_inc = count? count : 1;
+
+	// send a packet that include some data
+	// TODO: need to set timer
+	Packet *clone = this->clonePacket(p);
+	this->sendPacket("IPv4", p);
+	sock->seq_send += seq_inc;
+	sock->unacked.push_back(sock->seq_send);
+	assert(!sock->acktop.count(sock->seq_send) || sock->state == S_SYN_SIMRCVD || sock->state == S_CLOSE_WAIT);
+	sock->acktop[sock->seq_send] = clone;
 	
+	if (count > 0){
+		sock->in_flight += count;
+		assert(!sock->seqn_to_len.count(sock->seq_send));
+		sock->seqn_to_len[sock->seq_send] = count;
+	}
+	
+	return;
 }
 
 /*****************************************************************/
@@ -926,12 +938,9 @@ size_t TCPAssignment::writeBuf(Socket *sock, const void *buf, size_t count){
 		size_t data_len = cnt > 512? 512 : cnt;
 
 		Packet *p = create_packet(sock, ACK, data, data_len);
-		this->sendPacket("IPv4", p);
+		transmit_packet(sock, p, false, data_len);
 
 		// 3-2 TODO: keep the packet(duplicated) and send it again when it is lost
-		sock->seq_send += data_len;
-		sock->seqn_to_len[sock->seq_send] = data_len;
-		sock->in_flight += data_len;
 
 		data += data_len;
 		ret += data_len;
@@ -941,6 +950,7 @@ size_t TCPAssignment::writeBuf(Socket *sock, const void *buf, size_t count){
 }
 
 size_t TCPAssignment::Socket::readBuf(const void *buf, size_t count){
+	
 	void *new_rbuf = malloc(max_wnd);
 	memset(new_rbuf, 0, max_wnd);
 

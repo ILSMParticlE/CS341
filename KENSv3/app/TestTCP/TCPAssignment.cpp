@@ -432,8 +432,6 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 	packet->readData(34+12, &flags, 2);
 	flags = htons(flags);
 
-
-
 	int pid, sockfd;
 	Packet *myPacket;
 
@@ -756,6 +754,7 @@ TCPAssignment::Socket::Socket(){
 	buf_size = 0;
 	rbuf = malloc(max_wnd);
 	in_flight = 0;
+	dup_ack = 0;
 
 	lq = nullptr;
 }
