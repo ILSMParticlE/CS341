@@ -121,7 +121,7 @@ void TCPAssignment::syscall_close(UUID syscallUUID, int pid, int sockfd){
 	}
 
 	Socket *sock = pcblist[pid]->fdlist[sockfd];
-	
+
 	if (sock->state == S_ESTAB){
 		// active close in 4-handshaking
 		Packet *myPacket = create_packet(sock, FIN | ACK, nullptr, 0);
@@ -141,7 +141,7 @@ void TCPAssignment::syscall_close(UUID syscallUUID, int pid, int sockfd){
 				// In my implementation, although I should send FINACK packet for established socket,
 				// it is impossible since I didn't put them in PCB. I cannot find the matched socket
 				// when packet is arrived to it...
-				// So I'm going to delete them all... assume that there is no such cases...
+				// So I'm going to delete them all... assume that there are no such cases...
 
 				while (!sock->lq->pending.empty()){
 					Socket *tmp_sock = sock->lq->pending.front();
@@ -544,7 +544,11 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 			}
 			break;
 		case S_SYN_RCVD:
-			if (flags & ACK){
+			if ((flags & FIN) && (flags & ACK)){
+				printf("sibal\n");
+				sock->state = S_CLOSE_WAIT;
+			}
+			else if (flags & ACK){
 				if (pcblist[pid]->block && b->syscall == ACCEPT){
 					assert(pcblist[pid]->block);
 					assert(b->syscall == ACCEPT);
@@ -586,7 +590,7 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 
 				// send packet
 				myPacket = create_packet(sock, ACK, nullptr, 0);
-				transmit_packet(sock, myPacket, false, 0);
+				transmit_packet(sock, myPacket, true, 0);
 
 				sock->state = S_CLOSE_WAIT;
 
@@ -907,7 +911,7 @@ void TCPAssignment::transmit_packet(Socket *sock, Packet *p, bool isACK, size_t 
 	this->sendPacket("IPv4", p);
 	sock->seq_send += seq_inc;
 	sock->unacked.push_back(sock->seq_send);
-	assert(!sock->acktop.count(sock->seq_send) || sock->state == S_SYN_SIMRCVD);
+	assert(!sock->acktop.count(sock->seq_send) || sock->state == S_SYN_SIMRCVD || sock->state == S_CLOSE_WAIT);
 	sock->acktop[sock->seq_send] = clone;
 	
 	if (count > 0){
