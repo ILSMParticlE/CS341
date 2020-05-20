@@ -435,8 +435,6 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 	int pid, sockfd;
 	Packet *myPacket;
 
-	//printf("%d %d\n", ntohs(src_port), ntohs(dest_port));;
-
 	std::tie(pid, sockfd) = get_pid_fd(src_addr, src_port, dest_addr, dest_port);
 	if (pid == -1 && sockfd == -1){
 		// need to find listen state socket
@@ -503,7 +501,58 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 	// read opponent's window size
 	uint16_t swnd;
 	packet->readData(34+14, &swnd, 2);
-	sock->swnd = htons(swnd);
+	sock->swnd = ntohs(swnd);
+
+	uint16_t data_len;
+	packet->readData(14+2, &data_len, 2);
+	data_len = ntohs(data_len) - 40;
+
+	// get ACK, and check whether some packets should be retransmitted
+	if (flags == (ACK | (5 << 12))
+		|| (sock->state == S_SYN_SENT && flags == (SYN | ACK | (5<<12)))){
+		// exist unacked packet
+		if (sock->acktop.count(ack_sender)){
+			if (ack_sender > sock->last_ack){
+				sock->last_ack = ack_sender;
+				sock->dup_ack = 0;
+				// erase previous packets
+				uint32_t seq;
+				while (true){
+					seq = sock->unacked.front();
+
+					if (sock->seqn_to_len.count(seq)){
+						sock->in_flight -= sock->seqn_to_len[seq];
+						assert(sock->in_flight >= 0);
+						sock->seqn_to_len.erase(seq);
+					}
+					sock->unacked.erase(sock->unacked.begin());
+					sock->acktop.erase(seq);
+
+					if (seq == ack_sender) break;
+				}
+			}
+			if (ack_sender == sock->last_ack){
+				sock->dup_ack ++;
+				if (sock->dup_ack == 3){
+					// triple duplicate retransmit
+					uint32_t seq;
+					while (true){
+						seq = sock->unacked.front();
+						Packet *retransmit = this->clonePacket(sock->acktop[seq]);
+						this->sendPacket("IPv4", retransmit);
+						if (seq == ack_sender) break;
+					}
+				}
+				
+			}
+		}
+		// not exist, maybe previous acked packet
+		else{
+			// 4 TODO : congestion window control
+		}
+	
+	}
+
 
 	switch (sock->state){
 		case S_SYN_SENT:
@@ -530,9 +579,11 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 					
 				assert(pcblist[pid]->block);
 				assert(b->syscall == CONNECT);
+			
+				assert(sock->unacked.size() == 1);
+				sock->acktop.erase(sock->unacked.front());
+				sock->unacked.erase(sock->unacked.begin());
 				
-				//if (sock->seq_send != ack_sender) printf("fuck!123\n");
-
 				sock->seq_recv = seq_sender + 1;
 
 				// send packet
@@ -602,21 +653,17 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 			// read and write
 			else if (flags & ACK){
 				// get data length
-				uint16_t data_len;
-				packet->readData(14+2, &data_len, 2);
-				data_len = ntohs(data_len) - 40;
 			
+				/*
 				if (data_len == 0){	
 					// 3-2 TODO : check inflight algorithm
-					uint32_t ack_sender;
-					packet->readData(34+8, &ack_sender, 4);
-					ack_sender = ntohl(ack_sender);
 					if (sock->seqn_to_len.count(ack_sender)){
 						sock->in_flight -= sock->seqn_to_len[ack_sender];
 						assert(sock->in_flight >= 0);
 					}
 				}
-				
+				*/
+
 				if (data_len > 0){
 					packet->readData(54, (uint8_t *)sock->rbuf + sock->buf_size, data_len);
 					sock->buf_size += data_len;
@@ -755,6 +802,7 @@ TCPAssignment::Socket::Socket(){
 	rbuf = malloc(max_wnd);
 	in_flight = 0;
 	dup_ack = 0;
+	last_ack = 0;
 
 	lq = nullptr;
 }
@@ -910,7 +958,7 @@ void TCPAssignment::transmit_packet(Socket *sock, Packet *p, bool isACK, size_t 
 	this->sendPacket("IPv4", p);
 	sock->seq_send += seq_inc;
 	sock->unacked.push_back(sock->seq_send);
-	assert(!sock->acktop.count(sock->seq_send) || sock->state == S_SYN_SIMRCVD || sock->state == S_CLOSE_WAIT);
+	assert(!sock->acktop.count(sock->seq_send));
 	sock->acktop[sock->seq_send] = clone;
 	
 	if (count > 0){

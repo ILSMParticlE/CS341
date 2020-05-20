@@ -89,9 +89,10 @@ private:
 		size_t in_flight;
 		std::unordered_map<uint32_t, size_t> seqn_to_len;		// temporary member in 3-1
 
-		std::list<uint32_t> unacked;
+		std::vector<uint32_t> unacked;
 		std::unordered_map<uint32_t, Packet *> acktop;
 		int dup_ack;
+		uint32_t last_ack;
 
 		ListenQueue *lq;
 
