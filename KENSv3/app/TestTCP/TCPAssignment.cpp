@@ -120,8 +120,10 @@ void TCPAssignment::syscall_close(UUID syscallUUID, int pid, int sockfd){
 		return;
 	}
 
+	//printf("close syscall\n");
 	Socket *sock = pcblist[pid]->fdlist[sockfd];
 
+	//printf("sock state in close %d\n", sock->state);
 	if (sock->state == S_ESTAB){
 		// active close in 4-handshaking
 		Packet *myPacket = create_packet(sock, FIN | ACK, nullptr, 0);
@@ -514,7 +516,9 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 		if (sock->acktop.count(ack_sender)){
 			if (ack_sender > sock->last_ack){
 				sock->last_ack = ack_sender;
-				sock->dup_ack = 0;
+				sock->dup_ack = 1;
+				sock->last_ack_flags = flags;
+				// printf("dup reset \n");
 				// erase previous packets
 				uint32_t seq;
 				while (true){
@@ -528,22 +532,31 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 					sock->unacked.erase(sock->unacked.begin());
 					sock->acktop.erase(seq);
 
+					// TODO : erase timer
+					TimerPayload *timer = sock->timerlist[seq];
+					this->cancelTimer(timer->tUUID);
+					sock->timerlist.erase(seq);
+					// printf("seq %d\n", timer->seq);
+					delete timer;
+
+
 					if (seq == ack_sender) break;
 				}
 			}
-			if (ack_sender == sock->last_ack){
+			else if (ack_sender == sock->last_ack && sock->last_ack_flags == flags){
 				sock->dup_ack ++;
+				printf("dup ack %d\n", sock->dup_ack);
 				if (sock->dup_ack == 3){
+					sock->dup_ack = 0;
 					// triple duplicate retransmit
 					uint32_t seq;
 					while (true){
 						seq = sock->unacked.front();
-						Packet *retransmit = this->clonePacket(sock->acktop[seq]);
-						this->sendPacket("IPv4", retransmit);
+						//printf("case 1\n");
+						retransmit(sock, seq);
 						if (seq == ack_sender) break;
 					}
-				}
-				
+				}	
 			}
 		}
 		// not exist, maybe previous acked packet
@@ -552,7 +565,65 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 		}
 	
 	}
-
+	else if (flags & ACK){
+		/*
+		// SYNACK, FINACK retransmission from opponent
+		if (ack_sender == sock->last_ack && sock->last_ack_flags == flags){
+			sock->dup_ack ++;
+			printf("syn fin dup%d\n", sock->dup_ack);
+			if (sock->dup_ack == 3){
+				sock->dup_ack = 0;
+				// my ACK is lost, so retransmit ACK
+				sock->seq_send = ack_sender;
+				sock->seq_recv = seq_sender + 1 ;
+				Packet *reACK = create_packet(sock, ACK, nullptr, 0);
+				transmit_packet(sock, reACK, true, 0);
+			}
+		}
+		else if (ack_sender > sock->last_ack || (ack_sender == sock->last_ack && sock->last_ack_flags != flags)){
+			sock->last_ack = ack_sender;
+			sock->dup_ack = 1;
+			sock->last_ack_flags = flags;
+			printf("syn fin reset, SYN %d\n", flags & SYN);
+		}
+		else if (ack_sender < sock->last_ack){
+			// for example, you send FINACK, and opponent send FINACK, too
+			// you replied to it but this ACK is lost. However, you get opponent's ACK packet (seq = 2).
+			// The opponent should retransmit FINACK (seq = 1) and you need to reply it.
+			sock->last_ack = ack_sender;
+			sock->dup_ack = 1;
+			sock->last_ack_flags = flags;
+			printf("syn fin reset case 2\n");
+		}*/
+		if (flags & SYN && sock->state != S_SYN_SIMRCVD){
+			//printf("SYNACK retransmission detected\n");
+			uint32_t send_tmp, recv_tmp;
+			send_tmp = sock->seq_send;
+			recv_tmp = sock->seq_recv;
+			sock->seq_send = ack_sender;
+			sock->seq_recv = seq_sender + 1;
+			Packet *reACK = create_packet(sock, ACK, nullptr, 0);
+			transmit_packet(sock, reACK, true, 0);
+			sock->seq_send = send_tmp;
+			sock->seq_recv = recv_tmp;
+		}
+		if (flags & FIN){
+			if (sock->state != S_ESTAB && sock->state != S_FIN_WAIT_1 && sock->state != S_FIN_WAIT_2){
+				//printf("FINACK retransmission detected\n");
+				//printf("sockstate : %d\n", sock->state);
+				uint32_t send_tmp, recv_tmp;
+				send_tmp = sock->seq_send;
+				recv_tmp = sock->seq_recv;
+				sock->seq_send = ack_sender;
+				if (sock->close_sim) sock->seq_send ++;
+				sock->seq_recv = seq_sender + 1;
+				Packet *reACK = create_packet(sock, ACK, nullptr, 0);
+				transmit_packet(sock, reACK, true, 0);
+				sock->seq_send = send_tmp;
+				sock->seq_recv = recv_tmp;
+			}
+		}
+	}
 
 	switch (sock->state){
 		case S_SYN_SENT:
@@ -583,6 +654,10 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 				assert(sock->unacked.size() == 1);
 				sock->acktop.erase(sock->unacked.front());
 				sock->unacked.erase(sock->unacked.begin());
+				TimerPayload *timer = sock->timerlist.begin()->second;
+				this->cancelTimer(timer->tUUID);
+				sock->timerlist.erase(sock->timerlist.begin());
+				delete timer;
 				
 				sock->seq_recv = seq_sender + 1;
 
@@ -594,7 +669,6 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 			break;
 		case S_SYN_RCVD:
 			if ((flags & FIN) && (flags & ACK)){
-				printf("sibal\n");
 				sock->state = S_CLOSE_WAIT;
 			}
 			else if (flags & ACK){
@@ -619,28 +693,29 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 			break;
 		case S_SYN_SIMRCVD:
 			if (flags & ACK){
+				assert(!(flags & FIN));
 				this->returnSystemCall(b->syscallUUID, 0);
 				pcblist[pid]->unblock_syscall();
 
 				if (sock->seq_send != ack_sender) printf("fuck!!!!!!\n");
 
-				sock->seq_recv = seq_sender + 1;
-
-				// send packet
-				myPacket = create_packet(sock, ACK, nullptr, 0);
-				transmit_packet(sock, myPacket, true, 0);
+				// if get SYNACK send packet
+				if (flags & SYN){
+					sock->seq_recv = seq_sender + 1;
+					myPacket = create_packet(sock, ACK, nullptr, 0);
+					transmit_packet(sock, myPacket, true, 0);
+				}
 
 				sock->state = S_ESTAB;
 			}
 			break;
-		case S_ESTAB:
+		case S_ESTAB:	
 			if ((flags & FIN) && (flags & ACK)){
 				sock->seq_recv = seq_sender + 1;
 
 				// send packet
 				myPacket = create_packet(sock, ACK, nullptr, 0);
 				transmit_packet(sock, myPacket, true, 0);
-
 				sock->state = S_CLOSE_WAIT;
 
 				// if there is remaining blocked systemcall, break it
@@ -709,10 +784,10 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 				if (flags & FIN){
 					// simultaneous close
 					sock->seq_recv = seq_sender + 1;
-
 					myPacket = create_packet(sock, ACK, nullptr, 0);
 					transmit_packet(sock, myPacket, true, 0);
-
+					
+					sock->close_sim = true;
 					sock->state = S_CLOSING;
 				}
 				else{
@@ -724,26 +799,27 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 		case S_FIN_WAIT_2:
 			if ((flags & FIN) && (flags & ACK)){
 				sock->seq_recv = seq_sender + 1;
+				sock->state = S_TIMED_WAIT;
 
 				// send packet
 				myPacket = create_packet(sock, ACK, nullptr, 0);
 				transmit_packet(sock, myPacket, true, 0);
-
-				sock->state = S_TIMED_WAIT;
-
-				// timer check
-				this->addTimer(sock, TimeUtil::makeTime(2, TimeUtil::MINUTE));
 			}
 			break;
-		case S_CLOSING:
+		case S_CLOSING:{
 			assert(flags & ACK);
 			sock->state = S_TIMED_WAIT;
 
-			// timer check
-			this->addTimer(sock, TimeUtil::makeTime(2, TimeUtil::MINUTE));
+			// add timer
+			TimerPayload *finaltimer = new TimerPayload(false);
+			finaltimer->sock = sock;
+			set_timeout(finaltimer, TimeUtil::makeTime(2, TimeUtil::MINUTE));
+
 			break;
+		}
 		case S_LAST_ACK:
-			if (flags & ACK){
+			if ((flags & ACK) && !(flags & FIN)){
+				// 3-2 TODO : check ack and indicate whether it is last ack or not
 				pcblist[pid]->fdlist.erase(sockfd);
 				
 				std::multimap<in_port_t, in_addr_t>::iterator it;
@@ -766,12 +842,23 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 
 void TCPAssignment::timerCallback(void* payload)
 {
-	Socket *sock = (Socket *) payload;
-	int pid, fd;
-	std::tie(pid, fd) = get_pid_fd_sock(sock);
-	if (pid == -1 && fd == -1) printf("shit\n");
+	TimerPayload *timer = (TimerPayload *) payload;
+	Socket *sock = timer->sock;
+	if (timer->retransmit){
+		uint32_t seq = timer->seq;
+		// printf("case 2\n");
+		//if (sock->timerlist.count(seq)) retransmit(sock, seq);
+		retransmit(sock, seq);
+		
+	}
 	else{
-		pcblist[pid]->fdlist.erase(fd);
+		assert(sock->state == S_TIMED_WAIT);
+		int pid, fd;
+		std::tie(pid, fd) = get_pid_fd_sock(sock);
+		if (pid == -1 && fd == -1) printf("shit\n");
+		else{
+			pcblist[pid]->fdlist.erase(fd);
+		}
 	}
 }
 
@@ -953,13 +1040,22 @@ void TCPAssignment::transmit_packet(Socket *sock, Packet *p, bool isACK, size_t 
 	size_t seq_inc = count? count : 1;
 
 	// send a packet that include some data
-	// TODO: need to set timer
 	Packet *clone = this->clonePacket(p);
 	this->sendPacket("IPv4", p);
 	sock->seq_send += seq_inc;
 	sock->unacked.push_back(sock->seq_send);
 	assert(!sock->acktop.count(sock->seq_send));
 	sock->acktop[sock->seq_send] = clone;
+
+	// set timer
+	TimerPayload *timer = new TimerPayload(true);
+	if (sock->state == S_TIMED_WAIT) timer->retransmit = false;
+	// 4 TODO : sample RTT and estimated RTT
+	timer->sock = sock;
+	timer->seq = sock->seq_send;
+	Time limit = sock->state == S_TIMED_WAIT? TimeUtil::makeTime(2, TimeUtil::MINUTE) : TimeUtil::makeTime(100, TimeUtil::MSEC);
+	set_timeout(timer, limit);
+	sock->timerlist[sock->seq_send] = timer;
 	
 	if (count > 0){
 		sock->in_flight += count;
@@ -969,6 +1065,23 @@ void TCPAssignment::transmit_packet(Socket *sock, Packet *p, bool isACK, size_t 
 	
 	return;
 }
+
+void TCPAssignment::retransmit(Socket *sock, uint32_t seq){
+	// reset timer
+	assert(sock->timerlist.count(seq));
+	TimerPayload *timer = sock->timerlist[seq];
+	this->cancelTimer(timer->tUUID);
+	delete timer;
+	TimerPayload *new_timer = new TimerPayload(true);
+	new_timer->sock = sock;
+	new_timer->seq = seq;
+	set_timeout(new_timer, TimeUtil::makeTime(100, TimeUtil::MSEC));
+	sock->timerlist[seq] = new_timer;
+
+	Packet *retransmit = this->clonePacket(sock->acktop[seq]);
+	this->sendPacket("IPv4", retransmit);
+}
+
 
 /*****************************************************************/
 /*					 Functions handle buffers					 */
@@ -987,8 +1100,6 @@ size_t TCPAssignment::writeBuf(Socket *sock, const void *buf, size_t count){
 
 		Packet *p = create_packet(sock, ACK, data, data_len);
 		transmit_packet(sock, p, false, data_len);
-
-		// 3-2 TODO: keep the packet(duplicated) and send it again when it is lost
 
 		data += data_len;
 		ret += data_len;
@@ -1052,6 +1163,24 @@ void TCPAssignment::PCB::unblock_syscall(){
 	this->block = false;
 
 	return;
+}
+
+
+/*****************************************************************/
+/*					 Timer Handling Functions					 */
+/*****************************************************************/
+
+TCPAssignment::TimerPayload::TimerPayload(bool isRetransmit){
+	retransmit = isRetransmit;
+}
+
+TCPAssignment::TimerPayload::~TimerPayload(){
+}
+
+void TCPAssignment::set_timeout(TimerPayload *timer, Time limit){
+	timer->sent = this->getHost()->getSystem()->getCurrentTime();
+	timer->timeout = limit;
+	timer->tUUID = this->addTimer(timer, limit);
 }
 
 

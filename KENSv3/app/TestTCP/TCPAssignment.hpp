@@ -55,6 +55,20 @@ private:
 
 	class Socket;
 
+	class TimerPayload{
+    public:
+		Socket *sock;
+		uint32_t seq;
+		UUID tUUID;
+
+		bool retransmit;
+		Time sent;
+		Time timeout;
+
+		TimerPayload(bool isRetransmit);
+		~TimerPayload();
+	};
+
 	class ListenQueue{
 	public:
 		std::queue<Socket *> pending;
@@ -92,7 +106,11 @@ private:
 		std::vector<uint32_t> unacked;
 		std::unordered_map<uint32_t, Packet *> acktop;
 		int dup_ack;
+		uint16_t last_ack_flags;
 		uint32_t last_ack;
+		bool close_sim = false;
+
+		std::unordered_map<uint32_t, TimerPayload *> timerlist;
 
 		ListenQueue *lq;
 
@@ -165,9 +183,11 @@ public:
 	void write_header(Packet *packet, Socket *sock, uint16_t flags);
 	Packet *create_packet(Socket *sock, uint16_t flags, void *data, size_t data_len);
 	void transmit_packet(Socket *sock, Packet *p, bool isACK, size_t count);
+	void retransmit(Socket *sock, uint32_t seq);
 
 	size_t writeBuf(Socket *sock, const void *buf, size_t count);
 
+	void set_timeout(TimerPayload *timer, Time limit);
 protected:
 	virtual void systemCallback(UUID syscallUUID, int pid, const SystemCallParameter& param) final;
 	virtual void packetArrived(std::string fromModule, Packet* packet) final;
