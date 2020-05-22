@@ -509,121 +509,90 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 	packet->readData(14+2, &data_len, 2);
 	data_len = ntohs(data_len) - 40;
 
-	// get ACK, and check whether some packets should be retransmitted
-	if (flags == (ACK | (5 << 12))
-		|| (sock->state == S_SYN_SENT && flags == (SYN | ACK | (5<<12)))){
-		// exist unacked packet
+	// 200522 code begin
+	if (flags & ACK){
 		if (sock->acktop.count(ack_sender)){
-			if (ack_sender > sock->last_ack){
-				sock->last_ack = ack_sender;
-				sock->dup_ack = 1;
-				sock->last_ack_flags = flags;
-				// printf("dup reset \n");
-				// erase previous packets
-				uint32_t seq;
-				while (true){
-					seq = sock->unacked.front();
-
-					if (sock->seqn_to_len.count(seq)){
-						sock->in_flight -= sock->seqn_to_len[seq];
-						assert(sock->in_flight >= 0);
-						sock->seqn_to_len.erase(seq);
-					}
-					sock->unacked.erase(sock->unacked.begin());
-					sock->acktop.erase(seq);
-
-					// TODO : erase timer
-					TimerPayload *timer = sock->timerlist[seq];
-					this->cancelTimer(timer->tUUID);
-					sock->timerlist.erase(seq);
-					// printf("seq %d\n", timer->seq);
-					delete timer;
-
-
-					if (seq == ack_sender) break;
+			sock->last_ack = ack_sender;
+			sock->dup_ack = 1;
+			uint32_t seq;
+			while (true){
+				seq = sock->unacked.front();
+				
+				// delete previous packets' information
+				if (sock->seqn_to_len.count(seq)){
+					sock->in_flight -= sock->seqn_to_len[seq];
+					printf("[2. receiving inflight %d]\n", sock->in_flight);
+					assert(sock->in_flight >= 0);
+					sock->seqn_to_len.erase(seq);
 				}
+				sock->unacked.erase(sock->unacked.begin());
+				this->freePacket(sock->acktop[seq]);
+				sock->acktop.erase(seq);
+
+				// shut down timer
+				TimerPayload *timer = sock->timerlist[seq];
+				this->cancelTimer(timer->tUUID);
+				sock->timerlist.erase(seq);
+				delete timer;
+
+				if (seq == ack_sender) break;
 			}
-			else if (ack_sender == sock->last_ack && sock->last_ack_flags == flags){
-				sock->dup_ack ++;
-				printf("dup ack %d\n", sock->dup_ack);
-				if (sock->dup_ack == 3){
-					sock->dup_ack = 0;
-					// triple duplicate retransmit
-					uint32_t seq;
-					while (true){
-						seq = sock->unacked.front();
-						//printf("case 1\n");
-						retransmit(sock, seq);
-						if (seq == ack_sender) break;
-					}
-				}	
-			}
+			assert(!sock->acktop.count(ack_sender));
 		}
-		// not exist, maybe previous acked packet
 		else{
-			// 4 TODO : congestion window control
-		}
-	
-	}
-	else if (flags & ACK){
-		/*
-		// SYNACK, FINACK retransmission from opponent
-		if (ack_sender == sock->last_ack && sock->last_ack_flags == flags){
-			sock->dup_ack ++;
-			printf("syn fin dup%d\n", sock->dup_ack);
-			if (sock->dup_ack == 3){
-				sock->dup_ack = 0;
-				// my ACK is lost, so retransmit ACK
-				sock->seq_send = ack_sender;
-				sock->seq_recv = seq_sender + 1 ;
-				Packet *reACK = create_packet(sock, ACK, nullptr, 0);
-				transmit_packet(sock, reACK, true, 0);
-			}
-		}
-		else if (ack_sender > sock->last_ack || (ack_sender == sock->last_ack && sock->last_ack_flags != flags)){
-			sock->last_ack = ack_sender;
-			sock->dup_ack = 1;
-			sock->last_ack_flags = flags;
-			printf("syn fin reset, SYN %d\n", flags & SYN);
-		}
-		else if (ack_sender < sock->last_ack){
-			// for example, you send FINACK, and opponent send FINACK, too
-			// you replied to it but this ACK is lost. However, you get opponent's ACK packet (seq = 2).
-			// The opponent should retransmit FINACK (seq = 1) and you need to reply it.
-			sock->last_ack = ack_sender;
-			sock->dup_ack = 1;
-			sock->last_ack_flags = flags;
-			printf("syn fin reset case 2\n");
-		}*/
-		if (flags & SYN && sock->state != S_SYN_SIMRCVD){
-			//printf("SYNACK retransmission detected\n");
-			uint32_t send_tmp, recv_tmp;
-			send_tmp = sock->seq_send;
-			recv_tmp = sock->seq_recv;
-			sock->seq_send = ack_sender;
-			sock->seq_recv = seq_sender + 1;
-			Packet *reACK = create_packet(sock, ACK, nullptr, 0);
-			transmit_packet(sock, reACK, true, 0);
-			sock->seq_send = send_tmp;
-			sock->seq_recv = recv_tmp;
-		}
-		if (flags & FIN){
-			if (sock->state != S_ESTAB && sock->state != S_FIN_WAIT_1 && sock->state != S_FIN_WAIT_2){
-				//printf("FINACK retransmission detected\n");
-				//printf("sockstate : %d\n", sock->state);
+			// retransmission detected
+			// case 1. SYNACK, FINACK retransmission detected
+			if (flags & SYN && !(sock->state == S_SYN_SENT || sock->state == S_SYN_SIMRCVD)){
 				uint32_t send_tmp, recv_tmp;
-				send_tmp = sock->seq_send;
-				recv_tmp = sock->seq_recv;
+				send_tmp = sock->seq_send; recv_tmp = sock->seq_recv;
 				sock->seq_send = ack_sender;
-				if (sock->close_sim) sock->seq_send ++;
 				sock->seq_recv = seq_sender + 1;
 				Packet *reACK = create_packet(sock, ACK, nullptr, 0);
 				transmit_packet(sock, reACK, true, 0);
 				sock->seq_send = send_tmp;
 				sock->seq_recv = recv_tmp;
 			}
+			if (flags & FIN && !(sock->state == S_ESTAB || sock->state == S_FIN_WAIT_1 || sock->state == S_FIN_WAIT_2)){
+				uint32_t send_tmp, recv_tmp;
+				send_tmp = sock->seq_send; recv_tmp = sock->seq_recv;
+				sock->seq_send = ack_sender;
+				sock->seq_recv = seq_sender + 1;
+				if (sock->close_sim) sock->seq_send ++;
+				Packet *reACK = create_packet(sock, ACK, nullptr, 0);
+				transmit_packet(sock, reACK, true, 0);
+				sock->seq_send = send_tmp;
+				sock->seq_recv = recv_tmp;
+			}
+			
+			// case 2. duplicated ACK
+			if (flags == ((5 << 12) | ACK) && data_len == 0){
+				printf("/ I GOT IT /\n");
+				if (sock->last_ack == ack_sender){
+					printf("dupack %d\n", sock->dup_ack);
+					sock->dup_ack ++;
+					if (sock->dup_ack == 3){
+						printf("case 1\n");
+						
+						std::vector<uint32_t>::iterator it;
+						for (it = sock->unacked.begin(); it != sock->unacked.end(); ++it){
+							printf("* retransmit %d\n", *it);
+							retransmit(sock, *it);	
+						}
+					}
+				}
+				else{
+					printf("something wrong...?\n");
+				}
+				
+
+
+			}
+
 		}
 	}
+
+
+	// 200522 code end
 
 	switch (sock->state){
 		case S_SYN_SENT:
@@ -752,7 +721,7 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 				if (pcblist[pid]->block){
 					PCB::blockedInfo *b = pcblist[pid]->blocked_info;
 					if (b->syscall == WRITE){
-						if (sock->swnd - sock->in_flight > 0){		// 3-2 TODO :in flight, not received ACK...
+						if (sock->swnd - sock->in_flight > 0 && sock->in_flight < 51200){ // 3-2 TODO :in flight, not received ACK...
 							int ret = (int) writeBuf(sock, b->buf, b->count);
 							assert(ret > 0);
 							this->returnSystemCall(b->syscallUUID, ret);
@@ -1059,6 +1028,7 @@ void TCPAssignment::transmit_packet(Socket *sock, Packet *p, bool isACK, size_t 
 	
 	if (count > 0){
 		sock->in_flight += count;
+		printf("[transmit inflight %d]\n", sock->in_flight);
 		assert(!sock->seqn_to_len.count(sock->seq_send));
 		sock->seqn_to_len[sock->seq_send] = count;
 	}
@@ -1095,6 +1065,8 @@ size_t TCPAssignment::writeBuf(Socket *sock, const void *buf, size_t count){
 
 	//assert(sock->swnd > 0);
 	size_t cnt = count >= sock->swnd - sock->in_flight? sock->swnd - sock->in_flight : count;
+	if (sock->in_flight + cnt > 51200) cnt = 51200 - sock->in_flight;
+	if (sock->in_flight == 51200) cnt = 0;
 	while (cnt > 0){
 		size_t data_len = cnt > 512? 512 : cnt;
 

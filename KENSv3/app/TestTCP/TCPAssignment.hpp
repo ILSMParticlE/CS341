@@ -106,7 +106,6 @@ private:
 		std::vector<uint32_t> unacked;
 		std::unordered_map<uint32_t, Packet *> acktop;
 		int dup_ack;
-		uint16_t last_ack_flags;
 		uint32_t last_ack;
 		bool close_sim = false;
 
