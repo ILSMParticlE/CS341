@@ -101,8 +101,11 @@ private:
 		void *rbuf;
 		size_t buf_size;
 		size_t in_flight;
-		std::unordered_map<uint32_t, size_t> seqn_to_len;		// temporary member in 3-1
+		std::unordered_map<uint32_t, size_t> seqn_to_len;		// temporary member in 3-1, for in_flight
+		uint32_t buf_base; 			// seq num of the first buffer, would be used out-of-order data
+		std::map<uint32_t, size_t> outoforder_len;
 
+		// retransmision related
 		std::vector<uint32_t> unacked;
 		std::unordered_map<uint32_t, Packet *> acktop;
 		int dup_ack;
@@ -116,6 +119,7 @@ private:
 		Socket();
 		~Socket();
 		size_t readBuf(const void *buf, size_t count);
+		void set_buffer_base();
 
 	};
 	class PCB{
