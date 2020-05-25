@@ -145,7 +145,6 @@ void TCPAssignment::syscall_close(UUID syscallUUID, int pid, int sockfd){
 				// when packet is arrived to it...
 				// So I'm going to delete them all... assume that there are no such cases...
 
-				printf("listening socket closed\n");
 				while (!sock->lq->pending.empty()){
 					Socket *tmp_sock = sock->lq->pending.front();
 					int tmp_fd = sock->lq->pending_fd.front();
@@ -335,7 +334,8 @@ void TCPAssignment::syscall_accept(UUID syscallUUID, int pid,
 
 	// block syscall if there is no waiting
 	if (sock->lq->pending.empty()){
-		(*pcblist[pid]).block_syscall(ACCEPT, syscallUUID, sockfd, addr, 0, addrlen, nullptr, 0, 0);
+		if (pcblist[pid]->block) printf("already blocked? %d\n", pcblist[pid]->blocked_info->ret);
+		(*pcblist[pid]).block_syscall(ACCEPT, syscallUUID, sockfd, addr, 0, addrlen, nullptr, 0, -3);
 		return;
 	}
 
@@ -498,6 +498,7 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 				assert(b->syscall == ACCEPT);
 
 				int fd = this->createFileDescriptor(pid);
+				printf("/allocate fd %d, previous %d... %d/\n", fd, b->ret,src_port);
 				Socket *sock_dup = new Socket;
 				sock_dup->dest = set_addr_port(src_addr, src_port);
 				sock_dup->src = set_addr_port(dest_addr, dest_port);
@@ -512,7 +513,10 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 				sock_dup->state = S_SYN_RCVD;
 				transmit_packet(sock_dup, myPacket, false, 0);
 
-				(*pcblist[pid]).block_syscall(ACCEPT, b->syscallUUID, b->sockfd, b->addr, 0, b->addr_len_ptr, nullptr, 0, fd);
+				//pcblist[pid]->block_syscall(ACCEPT, b->syscallUUID, b->sockfd, b->addr, 0, b->addr_len_ptr, nullptr, 0, fd);
+				b->ret = fd;
+				printf("change to : %d\n", b->ret);
+				printf("\tin this case, pid : %d, sockfd : %d\n", pid, fd);
 			}
 		}	
 		this->freePacket(packet);
@@ -571,7 +575,8 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 				sock->seq_send = send_tmp;
 				sock->seq_recv = recv_tmp;
 			}
-			if (flags & FIN && !(sock->state == S_ESTAB || sock->state == S_FIN_WAIT_1 || sock->state == S_FIN_WAIT_2)){
+			if (flags & FIN && !(sock->state == S_SYN_RCVD
+								|| sock->state == S_ESTAB || sock->state == S_FIN_WAIT_1 || sock->state == S_FIN_WAIT_2)){
 				uint32_t send_tmp, recv_tmp;
 				send_tmp = sock->seq_send; recv_tmp = sock->seq_recv;
 				sock->seq_send = ack_sender;
@@ -642,7 +647,9 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 				assert(b->syscall == CONNECT);
 			
 				assert(sock->unacked.size() == 1);
-				sock->acktop.erase(sock->unacked.front());
+				uint32_t temp_seq = sock->unacked.front();
+				this->freePacket(sock->acktop[temp_seq]);
+				sock->acktop.erase(temp_seq);
 				sock->unacked.erase(sock->unacked.begin());
 				TimerPayload *timer = sock->timerlist.begin()->second;
 				this->cancelTimer(timer->tUUID);
@@ -658,19 +665,25 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 			}
 			break;
 		case S_SYN_RCVD:
-			/*
-			if ((flags & FIN) && (flags & ACK)){
-				sock->state = S_CLOSE_WAIT;
-			}
-			*/
-			if (flags & ACK && !(flags & FIN)){
+			//if (flags & ACK && !(flags & FIN)){
+			if (flags & ACK){
 				if (pcblist[pid]->block && b->syscall == ACCEPT){
 					assert(pcblist[pid]->block);
 					assert(b->syscall == ACCEPT);
-					this->returnSystemCall(b->syscallUUID, b->ret);
-					pcblist[pid]->unblock_syscall();
+					if (b->ret == -3) printf("haigo sibal...pid : %d\n", pid);
+					*(b->addr) = set_addr_port(dest_addr, dest_port);
+					*(b->addr_len_ptr) = sizeof(sock->dest);
+					//this->returnSystemCall(b->syscallUUID, b->ret);
+					this->returnSystemCall(b->syscallUUID, sockfd);
+					printf("b->ret : %d sockfd : %d\n", b->ret, sockfd);
+					printf("%d\n", pcblist[pid]->blocked_info->ret);
+					//pcblist[pid]->unblock_syscall();
+					pcblist[pid]->block = false;
+					free(pcblist[pid]->blocked_info);
+					printf("block %d\n", pcblist[pid]->block);
 				}
 				sock->state = S_ESTAB;
+				printf("changed state to estab, %d\n", src_port);
 
 				// set buffer base
 				sock->set_buffer_base();
@@ -680,10 +693,11 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 				std::tie(lpid, lfd) = get_listen_pid_fd(dest_addr, dest_port);
 			
 				// 0524 debug
-				printf("%d %d\n", dest_addr, dest_port);
+				//printf("%d %d\n", dest_addr, dest_port);
 				if (!pcblist.count(lpid)){
 					printf("error #1\n");
 					printf("[%d %d]\n", dest_addr, dest_port);
+					printf("srcport : %d\n", src_port);
 				}
 				else if (!pcblist[lpid]->fdlist.count(lfd)){
 					printf("error #2\n");
@@ -695,7 +709,25 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 
 				if (sock->seq_send != ack_sender) printf("fuck!!!\n");
 			
-			}	
+			}
+			if (flags & FIN){
+				// delete previous packets information
+				assert(sock->unacked.size() == 1);
+				uint32_t temp_seq = sock->unacked.front();
+				this->freePacket(sock->acktop[temp_seq]);
+				sock->acktop.erase(temp_seq);
+				sock->unacked.erase(sock->unacked.begin());
+				TimerPayload *timer = sock->timerlist.begin()->second;
+				this->cancelTimer(timer->tUUID);
+				sock->timerlist.erase(sock->timerlist.begin());
+				delete timer;
+
+				// send ACK to FINACK
+				sock->state = S_CLOSE_WAIT;
+				sock->seq_recv = seq_sender + 1;
+				myPacket = create_packet(sock, ACK, nullptr, 0);
+				transmit_packet(sock, myPacket, true, 0);
+			}
 			break;
 		case S_SYN_SIMRCVD:
 			if ((flags & ACK) && !(flags & FIN)){
@@ -728,16 +760,30 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 
 				// if there is remaining blocked systemcall, break it
 				if (pcblist[pid]->block){
-					this->returnSystemCall(pcblist[pid]->blocked_info->syscallUUID, -1);
+					int bret;
+					if (pcblist[pid]->blocked_info->syscall == ACCEPT){
+						printf("\n\naaaaaaaaaaaaaaaaaaaaaaa\n%d\n\n", src_port);
+						printf("///in packet arrived... pid : %d, fd : %d\n", pid, sockfd);
+						*(pcblist[pid]->blocked_info->addr) = set_addr_port(dest_addr, dest_port);
+						*(pcblist[pid]->blocked_info->addr_len_ptr) = sizeof(sock->dest);
+						bret = sockfd;
+					}
+					else{
+						this->returnSystemCall(pcblist[pid]->blocked_info->syscallUUID, -1);
+					}
+					//this->returnSystemCall(pcblist[pid]->blocked_info->syscallUUID, bret);
 				}
 
 			}
 
 			// read and write
 			else if (flags & ACK){
-				if (data_len > 0 && seq_sender >= sock->buf_base){
+				if (data_len > 0
+					&& ((!sock->buf_overflow && seq_sender >= sock->buf_base)
+							|| (sock->buf_overflow && ((int)seq_sender >= (int)sock->buf_base)))){
 					//printf("[datalen %d]\n", data_len);
 					//printf("seqsender : %d  bufbase : %d  diff : %d\n", seq_sender, sock->buf_base, seq_sender - sock->buf_base);
+					//if (sock->buf_overflow) printf("overflowed\n");
 					packet->readData(54, (uint8_t *)sock->rbuf + seq_sender - sock->buf_base, data_len);
 					sock->outoforder_len[seq_sender] = data_len;
 
@@ -858,9 +904,18 @@ void TCPAssignment::timerCallback(void* payload)
 	Socket *sock = timer->sock;
 	if (timer->retransmit){
 		uint32_t seq = timer->seq;
+		int cnt = timer->timer_cnt++;
 		// printf("case 2\n");
-		if (sock->timerlist.count(seq)) retransmit(sock, seq);
-		//retransmit(sock, seq);
+		// if (sock->timerlist.count(seq)) retransmit(sock, seq);
+		retransmit(sock, seq);
+		sock->timerlist[seq]->timer_cnt = cnt;
+		if (cnt > 100){
+			printf("\n\n\n\nno mother\n\n\n");
+			sock->timerlist[seq]->retransmit = false;
+		}
+
+		printf("cnt %d\n", cnt);
+		
 		
 	}
 	else{
@@ -907,6 +962,14 @@ TCPAssignment::Socket::Socket(){
 	lq = nullptr;
 }
 TCPAssignment::Socket::~Socket(){
+}
+
+TCPAssignment::PCB::PCB(){
+	block = false;
+	blocked_info = nullptr;
+}
+
+TCPAssignment::PCB::~PCB(){
 }
 
 /*****************************************************************/
@@ -1133,6 +1196,12 @@ size_t TCPAssignment::Socket::readBuf(const void *buf, size_t count){
 	memcpy((void *)buf, rbuf, rdata_len);
 	buf_size -= rdata_len;
 	rwnd += rdata_len;
+
+	//printf("/in read, base : %d, next_base : %d/\n", buf_base, buf_base + rdata_len);
+	if (buf_base > 0xFFFFFFFF - rdata_len){
+		buf_overflow = true;
+		//printf("sibal overfvlowd!!\n");
+	}
 	buf_base += rdata_len;
 
 	memcpy(new_rbuf, (uint8_t *)rbuf + rdata_len, max_wnd - rdata_len);
@@ -1158,6 +1227,7 @@ void TCPAssignment::PCB::block_syscall(SystemCall syscall, UUID syscallUUID, int
 				struct sockaddr *addr, socklen_t addr_len, socklen_t *addr_len_ptr,
 				const void *buf, size_t count,
 				int ret){
+	if (this->block) unblock_syscall();
 	this->block = true;
 	this->blocked_info = new blockedInfo;
 	
@@ -1179,8 +1249,9 @@ void TCPAssignment::PCB::block_syscall(SystemCall syscall, UUID syscallUUID, int
 }
 
 void TCPAssignment::PCB::unblock_syscall(){
-	delete this->blocked_info;
-	this->blocked_info = new struct blockedInfo;
+	//delete this->blocked_info;
+	//this->blocked_info = new struct blockedInfo;
+	free(this->blocked_info);
 	this->block = false;
 
 	return;
@@ -1193,6 +1264,7 @@ void TCPAssignment::PCB::unblock_syscall(){
 
 TCPAssignment::TimerPayload::TimerPayload(bool isRetransmit){
 	retransmit = isRetransmit;
+	timer_cnt = 0;
 }
 
 TCPAssignment::TimerPayload::~TimerPayload(){
