@@ -120,10 +120,8 @@ void TCPAssignment::syscall_close(UUID syscallUUID, int pid, int sockfd){
 		return;
 	}
 
-	//printf("close syscall\n");
 	Socket *sock = pcblist[pid]->fdlist[sockfd];
 
-	//printf("sock state in close %d\n", sock->state);
 	if (sock->state == S_ESTAB){
 		// active close in 4-handshaking
 		Packet *myPacket = create_packet(sock, FIN | ACK, nullptr, 0);
@@ -334,7 +332,6 @@ void TCPAssignment::syscall_accept(UUID syscallUUID, int pid,
 
 	// block syscall if there is no waiting
 	if (sock->lq->pending.empty()){
-		if (pcblist[pid]->block) printf("already blocked? %d\n", pcblist[pid]->blocked_info->ret);
 		(*pcblist[pid]).block_syscall(ACCEPT, syscallUUID, sockfd, addr, 0, addrlen, nullptr, 0, -3);
 		return;
 	}
@@ -450,7 +447,6 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 	checksum = ~checksum;
 	
 	if (checksum != 0){
-		//printf("%d\n", checksum);
 		this->freePacket(packet);
 		return;
 	}
@@ -498,7 +494,6 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 				assert(b->syscall == ACCEPT);
 
 				int fd = this->createFileDescriptor(pid);
-				printf("/allocate fd %d, previous %d... %d/\n", fd, b->ret,src_port);
 				Socket *sock_dup = new Socket;
 				sock_dup->dest = set_addr_port(src_addr, src_port);
 				sock_dup->src = set_addr_port(dest_addr, dest_port);
@@ -515,8 +510,6 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 
 				//pcblist[pid]->block_syscall(ACCEPT, b->syscallUUID, b->sockfd, b->addr, 0, b->addr_len_ptr, nullptr, 0, fd);
 				b->ret = fd;
-				printf("change to : %d\n", b->ret);
-				printf("\tin this case, pid : %d, sockfd : %d\n", pid, fd);
 			}
 		}	
 		this->freePacket(packet);
@@ -544,7 +537,6 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 				// delete previous packets' information
 				if (sock->seqn_to_len.count(seq)){
 					sock->in_flight -= sock->seqn_to_len[seq];
-					//printf("[2. receiving inflight %d]\n", sock->in_flight);
 					assert(sock->in_flight >= 0);
 					sock->seqn_to_len.erase(seq);
 				}
@@ -591,14 +583,11 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 			// case 2. duplicated ACK
 			if (flags == ((5 << 12) | ACK) && data_len == 0){
 				if (sock->last_ack == ack_sender){
-					//printf("dupack %d\n", sock->dup_ack);
 					sock->dup_ack ++;
 					if (sock->dup_ack == 3){
-						//printf("case 1\n");
 						
 						std::vector<uint32_t>::iterator it;
 						for (it = sock->unacked.begin(); it != sock->unacked.end(); ++it){
-							//printf("* retransmit %d\n", *it);
 							retransmit(sock, *it);	
 						}
 					}
@@ -670,20 +659,13 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 				if (pcblist[pid]->block && b->syscall == ACCEPT){
 					assert(pcblist[pid]->block);
 					assert(b->syscall == ACCEPT);
-					if (b->ret == -3) printf("haigo sibal...pid : %d\n", pid);
 					*(b->addr) = set_addr_port(dest_addr, dest_port);
 					*(b->addr_len_ptr) = sizeof(sock->dest);
-					//this->returnSystemCall(b->syscallUUID, b->ret);
 					this->returnSystemCall(b->syscallUUID, sockfd);
-					printf("b->ret : %d sockfd : %d\n", b->ret, sockfd);
-					printf("%d\n", pcblist[pid]->blocked_info->ret);
-					//pcblist[pid]->unblock_syscall();
 					pcblist[pid]->block = false;
 					free(pcblist[pid]->blocked_info);
-					printf("block %d\n", pcblist[pid]->block);
 				}
 				sock->state = S_ESTAB;
-				printf("changed state to estab, %d\n", src_port);
 
 				// set buffer base
 				sock->set_buffer_base();
@@ -692,19 +674,6 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 				int lpid, lfd;
 				std::tie(lpid, lfd) = get_listen_pid_fd(dest_addr, dest_port);
 			
-				// 0524 debug
-				//printf("%d %d\n", dest_addr, dest_port);
-				if (!pcblist.count(lpid)){
-					printf("error #1\n");
-					printf("[%d %d]\n", dest_addr, dest_port);
-					printf("srcport : %d\n", src_port);
-				}
-				else if (!pcblist[lpid]->fdlist.count(lfd)){
-					printf("error #2\n");
-					printf("[%d %d]\n", dest_addr, dest_port);
-				}
-				// 0524 debug end
-
 				if (lpid != -1 && lfd != -1) pcblist[lpid]->fdlist[lfd]->lq->cur_backlog--;
 
 				if (sock->seq_send != ack_sender) printf("fuck!!!\n");
@@ -760,18 +729,9 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 
 				// if there is remaining blocked systemcall, break it
 				if (pcblist[pid]->block){
-					int bret;
-					if (pcblist[pid]->blocked_info->syscall == ACCEPT){
-						printf("\n\naaaaaaaaaaaaaaaaaaaaaaa\n%d\n\n", src_port);
-						printf("///in packet arrived... pid : %d, fd : %d\n", pid, sockfd);
-						*(pcblist[pid]->blocked_info->addr) = set_addr_port(dest_addr, dest_port);
-						*(pcblist[pid]->blocked_info->addr_len_ptr) = sizeof(sock->dest);
-						bret = sockfd;
-					}
-					else{
+					if (pcblist[pid]->blocked_info->syscall != ACCEPT){
 						this->returnSystemCall(pcblist[pid]->blocked_info->syscallUUID, -1);
 					}
-					//this->returnSystemCall(pcblist[pid]->blocked_info->syscallUUID, bret);
 				}
 
 			}
@@ -781,9 +741,6 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 				if (data_len > 0
 					&& ((!sock->buf_overflow && seq_sender >= sock->buf_base)
 							|| (sock->buf_overflow && ((int)seq_sender >= (int)sock->buf_base)))){
-					//printf("[datalen %d]\n", data_len);
-					//printf("seqsender : %d  bufbase : %d  diff : %d\n", seq_sender, sock->buf_base, seq_sender - sock->buf_base);
-					//if (sock->buf_overflow) printf("overflowed\n");
 					packet->readData(54, (uint8_t *)sock->rbuf + seq_sender - sock->buf_base, data_len);
 					sock->outoforder_len[seq_sender] = data_len;
 
@@ -799,7 +756,6 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 							break;
 						}
 					}
-					//printf("buf_size %d\n", sock->buf_size);
 					sock->rwnd -= data_len;
 					assert(sock->rwnd >= 0 && sock->rwnd <= 51200);
 
@@ -904,19 +860,16 @@ void TCPAssignment::timerCallback(void* payload)
 	Socket *sock = timer->sock;
 	if (timer->retransmit){
 		uint32_t seq = timer->seq;
-		int cnt = timer->timer_cnt++;
-		// printf("case 2\n");
-		// if (sock->timerlist.count(seq)) retransmit(sock, seq);
-		retransmit(sock, seq);
-		sock->timerlist[seq]->timer_cnt = cnt;
-		if (cnt > 100){
-			printf("\n\n\n\nno mother\n\n\n");
-			sock->timerlist[seq]->retransmit = false;
+		int cnt = timer->timer_cnt;
+		cnt ++;
+		if (sock->timerlist.count(seq)) {
+			retransmit(sock, seq);
+			sock->timerlist[seq]->timer_cnt = cnt;
 		}
-
-		printf("cnt %d\n", cnt);
-		
-		
+		if (cnt > 100){
+			sock->timerlist[seq]->retransmit = false;
+			sock->state = S_TIMED_WAIT;
+		}
 	}
 	else{
 		assert(sock->state == S_TIMED_WAIT);
@@ -1135,7 +1088,6 @@ void TCPAssignment::transmit_packet(Socket *sock, Packet *p, bool isACK, size_t 
 	
 	if (count > 0){
 		sock->in_flight += count;
-		//printf("[transmit inflight %d]\n", sock->in_flight);
 		assert(!sock->seqn_to_len.count(sock->seq_send));
 		sock->seqn_to_len[sock->seq_send] = count;
 	}
@@ -1197,10 +1149,8 @@ size_t TCPAssignment::Socket::readBuf(const void *buf, size_t count){
 	buf_size -= rdata_len;
 	rwnd += rdata_len;
 
-	//printf("/in read, base : %d, next_base : %d/\n", buf_base, buf_base + rdata_len);
 	if (buf_base > 0xFFFFFFFF - rdata_len){
 		buf_overflow = true;
-		//printf("sibal overfvlowd!!\n");
 	}
 	buf_base += rdata_len;
 
