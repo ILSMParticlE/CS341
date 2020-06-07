@@ -167,6 +167,7 @@ void TCPAssignment::syscall_close(UUID syscallUUID, int pid, int sockfd){
 		}
 		pcblist[pid]->fdlist.erase(sockfd);
 		delete sock;
+		if (pcblist[pid]->fdlist.size() == 0) pcblist.erase(pid);
 	}
 
 	//pcblist[pid]->fdlist.erase(sockfd);
@@ -524,18 +525,62 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 	packet->readData(34+14, &swnd, 2);
 	sock->swnd = ntohs(swnd);
 
+	//printf("[cwnd : %d, ssthresh : %d], for port %d\n", sock->cwnd, sock->ssthresh, src_port);
 
 	// 200522 code begin
 	if (flags & ACK){
 		if (sock->acktop.count(ack_sender) && !(flags & (SYN | FIN))){
 			sock->last_ack = ack_sender;
-			sock->dup_ack = 1;
+			
+			// Lab4 new code
+			/*
+			if (sock->seqn_to_len.count(ack_sender)){
+				switch (sock->cstate){
+					case SLOW_START:
+						sock->cwnd += sock->MSS;
+						if (sock->cwnd >= sock->ssthresh) sock->cstate = CONGESTION_AVOIDANCE;
+						break;
+					case CONGESTION_AVOIDANCE:
+						assert(sock->cwnd != 0);
+						sock->cwnd += sock->MSS * (sock->MSS / sock->cwnd);
+						break;
+					case FAST_RECOVERY:
+						sock->cwnd = sock->ssthresh;
+						sock->cstate = CONGESTION_AVOIDANCE;
+						break;
+				}
+			}
+			*/
+			// Lab4 new code end
+			
+
+			sock->dup_ack = 0;
 			uint32_t seq;
 			while (true){
 				seq = sock->unacked.front();
 				
 				// delete previous packets' information
 				if (sock->seqn_to_len.count(seq)){
+					// Lab4 new code begin
+					
+					switch (sock->cstate){
+						case SLOW_START:
+							sock->cwnd += sock->MSS;
+							if (sock->cwnd >= sock->ssthresh) sock->cstate = CONGESTION_AVOIDANCE;
+							break;
+						case CONGESTION_AVOIDANCE:
+							assert(sock->cwnd != 0);
+							sock->cwnd += sock->MSS * (sock->MSS / sock->cwnd);
+							break;
+						case FAST_RECOVERY:
+							sock->cwnd = sock->ssthresh;
+							sock->cstate = CONGESTION_AVOIDANCE;
+							break;
+					}
+
+					// Lab4 new code end
+
+
 					sock->in_flight -= sock->seqn_to_len[seq];
 					assert(sock->in_flight >= 0);
 					sock->seqn_to_len.erase(seq);
@@ -590,7 +635,20 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 						for (it = sock->unacked.begin(); it != sock->unacked.end(); ++it){
 							retransmit(sock, *it);	
 						}
+
+						// Lab4 new code
+						sock->ssthresh = sock->cwnd/2;
+						sock->cwnd = sock->ssthresh + 3*sock->MSS;
+						sock->cstate= FAST_RECOVERY;
+						// Lab4 new code end
 					}
+
+					// Lab4 new code
+					if (sock->dup_ack > 3){
+						sock->cwnd += sock->MSS;
+					}
+					// Lab4 new code end
+					
 				}
 				else{
 					printf("something wrong...?\n");
@@ -623,6 +681,19 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 				sock->seq_recv = seq_sender + 1;
 				// set buffer base
 				sock->set_buffer_base();
+
+				// delete packet information
+
+				assert(sock->unacked.size() == 1);
+				uint32_t temp_seq = sock->unacked.front();
+				this->freePacket(sock->acktop[temp_seq]);
+				sock->acktop.erase(temp_seq);
+				sock->unacked.erase(sock->unacked.begin());
+				TimerPayload *timer = sock->timerlist.begin()->second;
+				this->cancelTimer(timer->tUUID);
+				sock->timerlist.erase(sock->timerlist.begin());
+				delete timer;
+
 
 				// send packet
 				myPacket = create_packet(sock, ACK, nullptr, 0);
@@ -766,7 +837,11 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 				if (pcblist[pid]->block){
 					PCB::blockedInfo *b = pcblist[pid]->blocked_info;
 					if (b->syscall == WRITE){
-						if (sock->swnd - sock->in_flight > 0 && sock->in_flight < 51200){ // 3-2 TODO :in flight, not received ACK...
+						int swnd = sock->swnd;
+						int cwnd = sock->cwnd;
+						uint32_t wnd_size = std::min(swnd, cwnd);
+						//if (sock->swnd - sock->in_flight > 0 && sock->in_flight < 51200){ // 3-2 TODO :in flight, not received ACK...
+						if (wnd_size - sock->in_flight > 0 && sock->in_flight < 51200){ // 3-2 TODO :in flight, not received ACK...
 							int ret = (int) writeBuf(sock, b->buf, b->count);
 							assert(ret > 0);
 							this->returnSystemCall(b->syscallUUID, ret);
@@ -865,6 +940,15 @@ void TCPAssignment::timerCallback(void* payload)
 		if (sock->timerlist.count(seq)) {
 			retransmit(sock, seq);
 			sock->timerlist[seq]->timer_cnt = cnt;
+
+			// lab4 new code begin
+			sock->cstate = SLOW_START;
+			sock->cwnd = sock->MSS;
+			sock->dup_ack = 0; // is this right??
+			sock->ssthresh =sock->cwnd/2;
+			// lab4 new code end
+
+
 		}
 		if (cnt > 100){
 			sock->timerlist[seq]->retransmit = false;
@@ -913,8 +997,13 @@ TCPAssignment::Socket::Socket(){
 	last_ack = 0;
 
 	lq = nullptr;
+
+	cwnd = 1*MSS;
+	ssthresh = 128 * MSS;
+	cstate = SLOW_START;
 }
 TCPAssignment::Socket::~Socket(){
+	free(rbuf);
 }
 
 TCPAssignment::PCB::PCB(){
@@ -1123,7 +1212,14 @@ size_t TCPAssignment::writeBuf(Socket *sock, const void *buf, size_t count){
 	// 3-2 TODO : check cnt
 
 	//assert(sock->swnd > 0);
-	size_t cnt = count >= sock->swnd - sock->in_flight? sock->swnd - sock->in_flight : count;
+	// Lab4 code begin
+	int swnd = sock->swnd;
+	int cwnd = sock->cwnd;
+	uint32_t wnd_size = std::min(swnd, cwnd);
+	size_t cnt = count >= wnd_size - sock->in_flight? wnd_size - sock->in_flight : count;
+	// Lab4 code end
+
+	//size_t cnt = count >= sock->swnd - sock->in_flight? sock->swnd - sock->in_flight : count;
 	if (sock->in_flight + cnt > 51200) cnt = 51200 - sock->in_flight;
 	if (sock->in_flight == 51200) cnt = 0;
 	while (cnt > 0){

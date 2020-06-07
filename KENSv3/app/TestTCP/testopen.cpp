@@ -62,6 +62,7 @@ protected:
 				close(fd_array[k]);
 			}
 		}
+
 		EXPECT_EQ(success, ((size_t)test_size) * ((size_t)test_repeat));
 		EXPECT_EQ(failed, 0);
 		EXPECT_EQ(duplicated, 0);

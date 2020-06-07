@@ -44,6 +44,12 @@ private:
 		S_LAST_ACK
 	};
 
+	enum CongestionState{
+		SLOW_START,
+		CONGESTION_AVOIDANCE,
+		FAST_RECOVERY
+	};
+
 	/* packet header flags */
 	const int FIN = 1 << 0;
 	const int SYN = 1 << 1;
@@ -123,6 +129,12 @@ private:
 		~Socket();
 		size_t readBuf(const void *buf, size_t count);
 		void set_buffer_base();
+
+		// congestion control
+		const uint16_t MSS = 512;
+		uint32_t cwnd;
+		uint32_t ssthresh;
+		CongestionState cstate;
 
 	};
 	class PCB{

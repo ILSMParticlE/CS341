@@ -68,6 +68,7 @@ protected:
 			socklen_t client_len = sizeof(client_addr);
 			memset(&client_addr, 0, client_len);
 			int client_fd = accept(server_socket, (struct sockaddr*)&client_addr, &client_len);
+			
 			if(client_fd >= 0)
 			{
 				EXPECT_EQ(client_len, sizeof(client_addr));
@@ -86,7 +87,6 @@ protected:
 			}
 			usleep(accept_period);
 		}
-
 		EXPECT_EQ((int)client_sockets.size(), expected_accept);
 		for(auto client_fd : client_sockets)
 		{
@@ -161,10 +161,9 @@ protected:
 				client_sockets.push_back(client_socket);
 				client_ports.push_back(temp_addr.sin_port);
 			}
-
 			usleep(connect_period);
 		}
-
+	
 		EXPECT_EQ((int)client_sockets.size(), expected_connect);
 		for(auto client_fd : client_sockets)
 		{
