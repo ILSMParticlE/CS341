@@ -13,6 +13,8 @@
 #include <E/Networking/E_Packet.hpp>
 #include <E/Networking/E_NetworkUtil.hpp>
 #include "TCPAssignment.hpp"
+#include <ctime>
+
 
 namespace E
 {
@@ -630,17 +632,22 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 				if (sock->last_ack == ack_sender){
 					sock->dup_ack ++;
 					if (sock->dup_ack == 3){
-						
-						std::vector<uint32_t>::iterator it;
-						for (it = sock->unacked.begin(); it != sock->unacked.end(); ++it){
-							retransmit(sock, *it);	
-						}
-
+					
 						// Lab4 new code
 						sock->ssthresh = sock->cwnd/2;
 						sock->cwnd = sock->ssthresh + 3*sock->MSS;
 						sock->cstate= FAST_RECOVERY;
 						// Lab4 new code end
+
+						std::vector<uint32_t>::iterator it;
+						int wnd = sock->cwnd;
+						for (it = sock->unacked.begin(); it != sock->unacked.end(); ++it){
+							retransmit(sock, *it);
+							wnd -= 512;
+							if (wnd <= 0) break;
+							break;
+
+						}
 					}
 
 					// Lab4 new code
@@ -943,9 +950,9 @@ void TCPAssignment::timerCallback(void* payload)
 
 			// lab4 new code begin
 			sock->cstate = SLOW_START;
+			sock->ssthresh = sock->cwnd / 2;
 			sock->cwnd = sock->MSS;
-			sock->dup_ack = 0; // is this right??
-			sock->ssthresh =sock->cwnd/2;
+			//sock->dup_ack = 0; // is this right??
 			// lab4 new code end
 
 
@@ -1311,6 +1318,7 @@ void TCPAssignment::PCB::unblock_syscall(){
 TCPAssignment::TimerPayload::TimerPayload(bool isRetransmit){
 	retransmit = isRetransmit;
 	timer_cnt = 0;
+	start = this->getCurrentTime();
 }
 
 TCPAssignment::TimerPayload::~TimerPayload(){
