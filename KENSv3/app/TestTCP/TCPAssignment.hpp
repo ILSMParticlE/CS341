@@ -59,6 +59,8 @@ private:
 	const int URG = 1 << 5;
 	/* packet header flags end */
 
+	static const int MSS = 512;
+
 	class Socket;
 
 	class TimerPayload{
@@ -72,8 +74,6 @@ private:
 		Time timeout;
 
 		int timer_cnt;
-
-		Time start;
 
 		TimerPayload(bool isRetransmit);
 		~TimerPayload();
@@ -120,7 +120,6 @@ private:
 		std::vector<uint32_t> unacked;
 		std::unordered_map<uint32_t, Packet *> acktop;
 		int dup_ack;
-
 		uint32_t last_ack;
 		bool close_sim = false;
 
@@ -134,7 +133,6 @@ private:
 		void set_buffer_base();
 
 		// congestion control
-		const uint16_t MSS = 512;
 		uint32_t cwnd;
 		uint32_t ssthresh;
 		CongestionState cstate;
